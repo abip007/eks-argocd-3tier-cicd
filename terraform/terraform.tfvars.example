@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (gitignored) and edit.
+
+region       = "ap-south-1"
+aws_profile  = "abip007"
+cluster_name = "argo-eks"
+app_host     = "cicd-bmi.bestclick.click"
+
+github_repo = "abip007/eks-argocd-3tier-cicd"
+git_branch  = "main"
+
+# Your public IP for the SonarQube UI (curl https://checkip.amazonaws.com)
+admin_cidrs = ["203.0.113.10/32"]
+
+# Don't put the token here - pass it from the environment instead:
+#   export TF_VAR_github_token=github_pat_xxx

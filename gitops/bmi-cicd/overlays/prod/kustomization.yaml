@@ -1,0 +1,38 @@
+# Production values for the CI/CD copy of the BMI app.
+# The pipeline (pipeline/stages/build-push.sh) rewrites these lines on every
+# release: 'newName:' + 'newTag:' of both images and the line ending in '# app-version'.
+# Everything else you set once (host, certificate) - see README "Your values".
+#
+# Initial images = the last release of the eks-argocd-3tier project (same account),
+# so Argo CD can bring the app up before this pipeline's first run. The first
+# pipeline run switches newName to the bmi-cicd-* repositories.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+
+images:
+  - name: bmi-backend
+    newName: 014882039467.dkr.ecr.ap-south-1.amazonaws.com/bmi-backend
+    newTag: e3797ed-20261109192753
+  - name: bmi-frontend
+    newName: 014882039467.dkr.ecr.ap-south-1.amazonaws.com/bmi-frontend
+    newTag: e3797ed-20261109192753
+
+patches:
+  - target: { kind: ConfigMap, name: backend-config }
+    patch: |
+      - op: replace
+        path: /data/FRONTEND_URL
+        value: https://cicd-bmi.bestclick.click
+      - op: replace
+        path: /data/APP_VERSION
+        value: "initial"  # app-version
+  - target: { kind: Ingress, name: bmi }
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: cicd-bmi.bestclick.click
+      - op: replace
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1certificate-arn
+        value: arn:aws:acm:ap-south-1:014882039467:certificate/056cd22c-8739-46ef-bbb6-a192dd6e696b

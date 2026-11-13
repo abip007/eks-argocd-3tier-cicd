@@ -1,0 +1,231 @@
+# GitHub Actions version of the CodePipeline. Same stages, same scripts:
+# every job calls pipeline/stages/<stage>.sh, exactly like pipeline/buildspec.yml.
+#
+#   unit-tests ─► code-quality ─► build-push ─► smoke-test
+#   coverage≥80%  SonarScan +     ECR images +   wait for Argo CD,
+#                 QualityGate     gitops tag     test the live URL
+#
+# Pull requests run only unit-tests (no AWS access, no SonarQube upload: the
+# Community Edition has one branch, so PR scans would overwrite main's analysis).
+# Pushes to main run all four jobs.
+#
+# One-time setup: docs/04-github-actions-guide.md
+#   Repo variables: AWS_ROLE_ARN, AWS_REGION, SONAR_HOST_URL, SONARQUBE_SG_ID, APP_URL
+#   Repo secrets:   none required (SONAR_TOKEN is read from Secrets Manager bmi-cicd/ci;
+#                   optional GITOPS_TOKEN if branch protection blocks GITHUB_TOKEN pushes)
+#
+# Run EITHER this workflow OR CodePipeline for releases, not both: both would
+# build and commit a release for the same push.
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+    # gitops/** is left out on purpose: the release commit must not start a new run.
+    paths:
+      - "app/**"
+      - "pipeline/**"
+      - "tests/**"
+      - "sonar-project.properties"
+      - ".github/workflows/ci-cd.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "pipeline/**"
+      - "tests/**"
+      - "sonar-project.properties"
+      - ".github/workflows/ci-cd.yml"
+  workflow_dispatch:
+
+# Releases queue up one after another (like CodePipeline QUEUED mode);
+# a newer PR push cancels the older PR run.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || 'release-main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  ECR_PREFIX: bmi-cicd
+  SONAR_PROJECT_KEY: bmi-cicd
+  GITHUB_REPO: ${{ github.repository }}
+  GIT_BRANCH: main
+  COMMIT_ID: ${{ github.sha }}
+
+jobs:
+  # ---------------------------------------------------------------- UnitTests
+  unit-tests:
+    name: Unit tests + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            app/backend/package-lock.json
+            app/frontend/package-lock.json
+
+      - name: Run unit tests (fails under 80% coverage)
+        run: bash pipeline/stages/unit-test.sh
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Coverage"
+            echo "| App | Line rate |"
+            echo "| --- | --- |"
+            for app in backend frontend; do
+              f="app/$app/coverage/cobertura-coverage.xml"
+              rate=$( [ -f "$f" ] && grep -o 'line-rate="[0-9.]*"' "$f" | head -1 | cut -d'"' -f2 || echo "n/a")
+              echo "| $app | $rate |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: |
+            app/backend/reports/junit.xml
+            app/frontend/reports/junit.xml
+            app/backend/coverage/
+            app/frontend/coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ------------------------------------------------ SonarScan + QualityGate
+  code-quality:
+    name: SonarQube scan + quality gate
+    needs: unit-tests
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write   # OIDC -> AWS role
+    env:
+      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+      SONARQUBE_SG_ID: ${{ vars.SONARQUBE_SG_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history: SonarQube uses git blame for "new code"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            app/backend/package-lock.json
+            app/frontend/package-lock.json
+
+      - name: AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Read SONAR_TOKEN from Secrets Manager (bmi-cicd/ci)
+        run: |
+          token=$(aws secretsmanager get-secret-value --secret-id bmi-cicd/ci \
+                    --query SecretString --output text | jq -r .sonar_token)
+          [ -n "$token" ] && [ "$token" != null ] || { echo "sonar_token missing in bmi-cicd/ci"; exit 1; }
+          echo "::add-mask::$token"
+          echo "SONAR_TOKEN=$token" >> "$GITHUB_ENV"
+
+      # SonarQube's security group allows only admins + CodeBuild. GitHub-hosted
+      # runner IPs are too many to allow-list, so open 9000 to this runner only.
+      - name: Allow this runner to reach SonarQube
+        id: sg
+        run: |
+          ip=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')
+          echo "Runner IP: $ip"
+          out=$(aws ec2 authorize-security-group-ingress --group-id "$SONARQUBE_SG_ID" \
+                  --ip-permissions "IpProtocol=tcp,FromPort=9000,ToPort=9000,IpRanges=[{CidrIp=$ip/32,Description=gha-run-${{ github.run_id }}}]" 2>&1) \
+            && echo "added=true" >> "$GITHUB_OUTPUT" \
+            || { echo "$out" | grep -q InvalidPermission.Duplicate || { echo "$out"; exit 1; }; echo "rule already exists"; }
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          # Wait until SonarQube answers through the new rule.
+          for i in $(seq 1 12); do
+            curl -fsS --max-time 5 "$SONAR_HOST_URL/api/system/status" && echo && break
+            sleep 5
+          done
+
+      - name: SonarQube analysis
+        id: scan
+        run: bash pipeline/stages/sonar-scan.sh
+
+      - name: Quality gate
+        env:
+          SONAR_CE_TASK_ID: ${{ steps.scan.outputs.SONAR_CE_TASK_ID }}
+        run: bash pipeline/stages/quality-gate.sh
+
+      - name: Remove runner access to SonarQube
+        if: always() && steps.sg.outputs.added == 'true'
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id "$SONARQUBE_SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=9000,ToPort=9000,IpRanges=[{CidrIp=${{ steps.sg.outputs.ip }}/32}]"
+
+  # ---------------------------------------------------------------- BuildPush
+  build-push:
+    name: Build + push images, bump gitops tag
+    needs: code-quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write   # GITHUB_TOKEN pushes the release commit to gitops/
+      id-token: write
+    outputs:
+      image_tag: ${{ steps.build.outputs.IMAGE_TAG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: docker build/push to ECR + commit new tag
+        id: build
+        env:
+          # Commits made with GITHUB_TOKEN never trigger workflows, so no loop.
+          # Set GITOPS_TOKEN (fine-grained PAT, Contents: write) if branch protection rejects it.
+          GITHUB_TOKEN: ${{ secrets.GITOPS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: bash pipeline/stages/build-push.sh
+
+      - name: Summary
+        run: echo "Released image tag **${{ steps.build.outputs.IMAGE_TAG }}**. Argo CD will sync it." >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- SmokeTest
+  smoke-test:
+    name: Smoke test live app
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20   # waits up to 15 min for Argo CD
+    env:
+      APP_URL: ${{ vars.APP_URL || 'https://cicd-bmi.bestclick.click' }}
+      IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for rollout, then smoke test
+        run: bash pipeline/stages/smoke-test.sh
+
+      - name: Upload smoke test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-report
+          path: reports/smoke-junit.xml
+          if-no-files-found: ignore
+          retention-days: 14

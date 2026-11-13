@@ -1,0 +1,99 @@
+{
+  "pipeline": {
+    "name": "${NAME}",
+    "roleArn": "arn:aws:iam::${ACCOUNT_ID}:role/${NAME}-codepipeline",
+    "pipelineType": "V2",
+    "executionMode": "QUEUED",
+    "artifactStore": { "type": "S3", "location": "${BUCKET}" },
+    "triggers": [{
+      "providerType": "CodeStarSourceConnection",
+      "gitConfiguration": {
+        "sourceActionName": "Source",
+        "push": [{
+          "branches": { "includes": ["${GIT_BRANCH}"] },
+          "filePaths": { "includes": ["app/**", "pipeline/**", "tests/**", "sonar-project.properties"] }
+        }]
+      }
+    }],
+    "stages": [
+      {
+        "name": "Source",
+        "actions": [{
+          "name": "Source",
+          "namespace": "SourceVariables",
+          "actionTypeId": { "category": "Source", "owner": "AWS", "provider": "CodeStarSourceConnection", "version": "1" },
+          "outputArtifacts": [{ "name": "SourceOutput" }],
+          "configuration": {
+            "ConnectionArn": "${CONNECTION_ARN}",
+            "FullRepositoryId": "${GITHUB_REPO}",
+            "BranchName": "${GIT_BRANCH}",
+            "OutputArtifactFormat": "CODE_ZIP"
+          }
+        }]
+      },
+      {
+        "name": "Test",
+        "actions": [{
+          "name": "UnitTests",
+          "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },
+          "inputArtifacts": [{ "name": "SourceOutput" }],
+          "configuration": {
+            "ProjectName": "${NAME}",
+            "EnvironmentVariables": "[{\"name\":\"STAGE\",\"value\":\"unit-test\",\"type\":\"PLAINTEXT\"}]"
+          }
+        }]
+      },
+      {
+        "name": "CodeQuality",
+        "actions": [
+          {
+            "name": "SonarScan",
+            "namespace": "SonarScan",
+            "runOrder": 1,
+            "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },
+            "inputArtifacts": [{ "name": "SourceOutput" }],
+            "configuration": {
+              "ProjectName": "${NAME}",
+              "EnvironmentVariables": "[{\"name\":\"STAGE\",\"value\":\"sonar-scan\",\"type\":\"PLAINTEXT\"},{\"name\":\"COMMIT_ID\",\"value\":\"#{SourceVariables.CommitId}\",\"type\":\"PLAINTEXT\"}]"
+            }
+          },
+          {
+            "name": "QualityGate",
+            "runOrder": 2,
+            "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },
+            "inputArtifacts": [{ "name": "SourceOutput" }],
+            "configuration": {
+              "ProjectName": "${NAME}",
+              "EnvironmentVariables": "[{\"name\":\"STAGE\",\"value\":\"quality-gate\",\"type\":\"PLAINTEXT\"},{\"name\":\"SONAR_CE_TASK_ID\",\"value\":\"#{SonarScan.SONAR_CE_TASK_ID}\",\"type\":\"PLAINTEXT\"}]"
+            }
+          }
+        ]
+      },
+      {
+        "name": "Build",
+        "actions": [{
+          "name": "BuildPush",
+          "namespace": "Build",
+          "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },
+          "inputArtifacts": [{ "name": "SourceOutput" }],
+          "configuration": {
+            "ProjectName": "${NAME}",
+            "EnvironmentVariables": "[{\"name\":\"STAGE\",\"value\":\"build-push\",\"type\":\"PLAINTEXT\"},{\"name\":\"COMMIT_ID\",\"value\":\"#{SourceVariables.CommitId}\",\"type\":\"PLAINTEXT\"}]"
+          }
+        }]
+      },
+      {
+        "name": "Verify",
+        "actions": [{
+          "name": "SmokeTest",
+          "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },
+          "inputArtifacts": [{ "name": "SourceOutput" }],
+          "configuration": {
+            "ProjectName": "${NAME}",
+            "EnvironmentVariables": "[{\"name\":\"STAGE\",\"value\":\"smoke-test\",\"type\":\"PLAINTEXT\"},{\"name\":\"IMAGE_TAG\",\"value\":\"#{Build.IMAGE_TAG}\",\"type\":\"PLAINTEXT\"}]"
+          }
+        }]
+      }
+    ]
+  }
+}

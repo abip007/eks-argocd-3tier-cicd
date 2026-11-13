@@ -1,0 +1,21 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tf.plan
+crash.log
+terraform.tfvars
+
+# Node / test output
+node_modules/
+dist/
+coverage/
+reports/
+
+# Pipeline scripts, local runs
+.scannerwork/
+.pipeline-outputs.env
+pipeline/local.env
+cli/.out/
+cli/ids.env

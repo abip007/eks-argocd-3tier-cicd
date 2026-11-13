@@ -1,0 +1,34 @@
+# Argo CD Application for this project. Apply it ONCE to the existing argo-eks
+# cluster (kubectl apply -f, or Terraform does it). From then on Argo CD deploys
+# whatever the pipeline commits to gitops/bmi-cicd/overlays/prod.
+# Not part of the old repo's root app-of-apps, so the two projects stay independent.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bmi-cicd
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io   # deleting the app removes its ALB rule and pods
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/abip007/eks-argocd-3tier-cicd.git
+    targetRevision: main
+    path: gitops/bmi-cicd/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bmi-cicd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 3m }
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: bmi-backend
+      jsonPointers: [/spec/replicas]

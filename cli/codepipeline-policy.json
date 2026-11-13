@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Artifacts",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:GetBucketVersioning", "s3:GetBucketLocation"],
+      "Resource": ["arn:aws:s3:::${BUCKET}", "arn:aws:s3:::${BUCKET}/*"]
+    },
+    {
+      "Sid": "GitHubConnection",
+      "Effect": "Allow",
+      "Action": ["codestar-connections:UseConnection", "codeconnections:UseConnection"],
+      "Resource": "${CONNECTION_ARN}"
+    },
+    {
+      "Sid": "RunBuilds",
+      "Effect": "Allow",
+      "Action": ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
+      "Resource": "arn:aws:codebuild:${AWS_REGION}:${ACCOUNT_ID}:project/${NAME}"
+    }
+  ]
+}

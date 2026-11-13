@@ -1,0 +1,51 @@
+# One CodeBuild project serves every pipeline action. Each CodePipeline action
+# sets STAGE and this file runs pipeline/stages/$STAGE.sh:
+#
+#   UnitTests    STAGE=unit-test     tests + coverage thresholds (80%)
+#   SonarScan    STAGE=sonar-scan    SonarQube analysis (with the coverage)
+#   QualityGate  STAGE=quality-gate  waits for SonarQube, fails if the gate is red
+#   BuildPush    STAGE=build-push    docker build/push to ECR, bump tag in gitops/
+#   SmokeTest    STAGE=smoke-test    waits for Argo CD to roll out, tests the live URL
+#
+# The stage scripts are plain bash; you can run them on your PC too (see README).
+version: 0.2
+
+env:
+  shell: bash
+  secrets-manager:
+    # One secret, two keys. Created by Terraform / CLI / console guide.
+    GITHUB_TOKEN: bmi-cicd/ci:github_token
+    SONAR_TOKEN: bmi-cicd/ci:sonar_token
+  # Passed to later actions as #{SonarScan.SONAR_CE_TASK_ID} and #{Build.IMAGE_TAG}.
+  exported-variables:
+    - SONAR_CE_TASK_ID
+    - IMAGE_TAG
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+  build:
+    commands:
+      - echo "Pipeline stage: ${STAGE:?STAGE is not set on this pipeline action}"
+      - bash "pipeline/stages/${STAGE}.sh"
+      # Stage scripts write KEY=VALUE lines here; exporting them lets CodeBuild
+      # hand them to the next pipeline action (exported-variables above).
+      - if [ -f .pipeline-outputs.env ]; then set -a; . ./.pipeline-outputs.env; set +a; cat .pipeline-outputs.env; fi
+
+# Shown in CodeBuild > Report groups. Stages without these files just skip them.
+reports:
+  unit-tests:
+    files:
+      - app/backend/reports/junit.xml
+      - app/frontend/reports/junit.xml
+    file-format: JUNITXML
+  coverage:
+    files:
+      - app/backend/coverage/cobertura-coverage.xml
+      - app/frontend/coverage/cobertura-coverage.xml
+    file-format: COBERTURAXML
+  smoke-tests:
+    files:
+      - reports/smoke-junit.xml
+    file-format: JUNITXML
