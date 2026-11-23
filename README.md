@@ -1,7 +1,8 @@
 # BMI Health Tracker: CI/CD pipeline with SonarQube, quality gate and smoke tests
 
-This project adds a **CI/CD pipeline** in front of the GitOps deployment from
-[eks-argocd-3tier](../eks-argocd-3tier). A `git push` to `app/` starts AWS CodePipeline:
+A self-contained EKS + Argo CD platform with a **CI/CD pipeline** in front of the GitOps
+deployment. The Terraform path builds everything (VPC, EKS cluster, controllers, Argo CD,
+SonarQube, pipeline) in one apply. A `git push` to `app/` starts AWS CodePipeline:
 
 ```
 git push (app/**, tests/**, pipeline/**)
@@ -15,7 +16,7 @@ git push (app/**, tests/**, pipeline/**)
              coverage ≥ 80%  + coverage to     SonarQube,   to ECR, commit new   live app reports
              (fails below)   SonarQube         fail if red  tag to gitops/ ──┐   the new version,
                                                                               │   then 7 HTTP checks
-                             Argo CD (already running in argo-eks) ◄──────────┘   against the public URL
+                             Argo CD (in bmi-cicd-eks)           ◄──────────┘   against the public URL
                              syncs gitops/bmi-cicd → namespace bmi-cicd
 ```
 
@@ -47,15 +48,20 @@ team knows the release is broken. To roll back, `git revert` the release commit.
 | Secrets Manager secret | `bmi-cicd/ci` | `{"github_token": ..., "sonar_token": ...}` |
 | EC2 + Elastic IP + SG | `bmi-cicd-sonarqube` | SonarQube Community + PostgreSQL in Docker, port 9000 open only to you and CodeBuild |
 | IAM roles | `bmi-cicd-codebuild`, `bmi-cicd-codepipeline`, `bmi-cicd-sonarqube-ec2` | Least privilege, scoped to the resources above |
-| In the existing cluster | namespace `bmi-cicd`, 2 secrets, Argo CD app `bmi-cicd` | Joins the existing shared ALB (`group.name: shared`) |
+| VPC + EKS cluster (Terraform path) | `bmi-cicd-eks`, VPC `10.2.0.0/16`, 2 × m7i-flex.large nodes | One NAT gateway, add-ons, Pod Identity roles |
+| Platform in the cluster (Terraform path) | LB Controller, ExternalDNS, Argo CD (`https://argocd-cicd.bestclick.click`) | App and Argo CD UI share one ALB (`group.name: shared`) |
+| App in the cluster | namespace `bmi-cicd`, 2 secrets, Argo CD app `bmi-cicd` | |
 | Public URL | `https://cicd-bmi.bestclick.click` | ExternalDNS creates the record; the existing wildcard ACM cert covers it |
 
-The old app (`bmi-app`, `argo-bmi.bestclick.click`) is not touched. Both apps run side by side.
+Nothing here depends on the eks-argocd-3tier project. Its names (`argo-eks`, `argocd.bestclick.click`,
+`10.1.0.0/16`) are different, so both can exist in one account.
 
 ## Prerequisites
 
-1. **The eks-argocd-3tier platform is running**: cluster `argo-eks` with Argo CD, the AWS Load
-   Balancer Controller and ExternalDNS. This project adds no cluster or VPC.
+1. A **Route 53 public hosted zone** (`bestclick.click`) and an **ISSUED ACM certificate** for
+   `bestclick.click` + `*.bestclick.click` in the region. Terraform looks both up, it doesn't create them.
+   The console and CLI guides still expect a cluster with Argo CD, the LB Controller and
+   ExternalDNS to exist already; the Terraform path creates it.
 2. A GitHub repo for this project: `abip007/eks-argocd-3tier-cicd`, **public**, because Argo CD
    reads it without credentials.
    ```bash
@@ -68,9 +74,8 @@ The old app (`bmi-app`, `argo-bmi.bestclick.click`) is not touched. Both apps ru
    *Generate new token* → Repository access: *Only select repositories* →
    `eks-argocd-3tier-cicd` → Permissions → **Contents: Read and write**. The BuildPush stage uses it
    to commit the new image tag.
-4. A **default VPC** in the region (SonarQube runs there). If you deleted it:
-   `aws ec2 create-default-vpc`.
-5. Tools on your PC: AWS CLI v2, kubectl, Git Bash, and Terraform ≥ 1.6 for the Terraform path.
+4. Tools on your PC: AWS CLI v2, kubectl, Git Bash, and Terraform ≥ 1.6 for the Terraform path
+   (Terraform runs `aws` and `kubectl` itself, so both must be on PATH).
    Docker is only needed to run the stage scripts locally.
 
 ### Your values

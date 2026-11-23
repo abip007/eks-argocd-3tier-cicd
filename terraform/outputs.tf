@@ -27,3 +27,23 @@ output "ecr_repository_urls" {
 output "app_url" {
   value = "https://${var.app_host}"
 }
+
+output "cluster_name" {
+  value = aws_eks_cluster.this.name
+}
+
+output "kubeconfig_command" {
+  value = "aws eks update-kubeconfig --name ${aws_eks_cluster.this.name} --region ${var.region}${var.aws_profile == null ? "" : " --profile ${var.aws_profile}"}"
+}
+
+output "argocd_url" {
+  value = "https://${var.argocd_host}"
+}
+
+output "argocd_admin_password_command" {
+  value = "kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+}
+
+output "certificate_arn" {
+  value = local.certificate_arn
+}

@@ -1,22 +1,8 @@
-# SonarQube server: one EC2 instance in the default VPC running SonarQube +
+# SonarQube server: one EC2 instance in a public subnet of this project's VPC
+# (network.tf) running SonarQube +
 # PostgreSQL in Docker (sonarqube/user-data.sh). Port 9000 is open only to your
 # IP and to CodeBuild's published IP ranges in this region. No SSH: use
 # Session Manager (EC2 > Connect > Session Manager).
-
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-  filter {
-    name   = "default-for-az"
-    values = ["true"]
-  }
-}
 
 # CodeBuild (without VPC config) reaches SonarQube from these addresses.
 data "aws_ip_ranges" "codebuild" {
@@ -31,7 +17,7 @@ data "aws_ssm_parameter" "al2023" {
 resource "aws_security_group" "sonarqube" {
   name        = "${var.name}-sonarqube"
   description = "SonarQube UI/API: admin IPs + CodeBuild"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.this.id
 
   ingress {
     description = "SonarQube from admins"
@@ -82,7 +68,7 @@ resource "aws_iam_instance_profile" "sonarqube" {
 resource "aws_instance" "sonarqube" {
   ami                    = data.aws_ssm_parameter.al2023.value
   instance_type          = var.sonar_instance_type
-  subnet_id              = data.aws_subnets.default.ids[0]
+  subnet_id              = aws_subnet.public[0].id
   vpc_security_group_ids = [aws_security_group.sonarqube.id]
   iam_instance_profile   = aws_iam_instance_profile.sonarqube.name
   user_data              = file("${path.module}/../sonarqube/user-data.sh")

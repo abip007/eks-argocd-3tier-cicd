@@ -27,7 +27,8 @@ phases:
       nodejs: 20
   build:
     commands:
-      - echo "Pipeline stage: ${STAGE:?STAGE is not set on this pipeline action}"
+      # Whole line in single quotes: an unquoted ': ' would make YAML read it as a key/value pair.
+      - 'echo "Pipeline stage: ${STAGE:?STAGE is not set on this pipeline action}"'
       - bash "pipeline/stages/${STAGE}.sh"
       # Stage scripts write KEY=VALUE lines here; exporting them lets CodeBuild
       # hand them to the next pipeline action (exported-variables above).

@@ -1,4 +1,4 @@
-# Argo CD Application for this project. Apply it ONCE to the existing argo-eks
+# Argo CD Application for this project. Apply it ONCE to the cluster
 # cluster (kubectl apply -f, or Terraform does it). From then on Argo CD deploys
 # whatever the pipeline commits to gitops/bmi-cicd/overlays/prod.
 # Not part of the old repo's root app-of-apps, so the two projects stay independent.

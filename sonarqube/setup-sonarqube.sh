@@ -82,12 +82,15 @@ api POST qualitygates/select --data-urlencode "gateName=$GATE" --data-urlencode 
 echo "  assigned to $PROJECT_KEY"
 
 say "4. User $CI_USER"
-if api GET "users/search?q=$CI_USER" | grep -q "\"login\":\"$CI_USER\""; then
+# v2 users API: the old api/users/create drops the connection on SonarQube 26.x
+# ("curl: (52) Empty reply from server").
+if api GET "v2/users-management/users?q=$CI_USER" | grep -q "\"login\" *: *\"$CI_USER\""; then
   echo "  exists"
 else
   # Random password nobody needs: the pipeline only uses the token.
-  api POST users/create --data-urlencode "login=$CI_USER" --data-urlencode "name=CI pipeline" \
-    --data-urlencode "password=$(openssl rand -base64 24 | tr -d '/+=')Aa1!" >/dev/null
+  CI_PASS="$(openssl rand -base64 24 | tr -d '/+=\r\n')Aa1!"
+  api POST v2/users-management/users -H 'Content-Type: application/json' \
+    -d "{\"login\":\"$CI_USER\",\"name\":\"CI pipeline\",\"password\":\"$CI_PASS\",\"local\":true}" >/dev/null
   echo "  created"
 fi
 for perm in user scan; do   # user = Browse (read the gate), scan = Execute Analysis

@@ -1,15 +1,24 @@
 # Copy to terraform.tfvars (gitignored) and edit.
 
 region       = "ap-south-1"
-aws_profile  = "abip007"
-cluster_name = "argo-eks"
+aws_profile  = "abip007home"
+cluster_name = "bmi-cicd-eks"
 app_host     = "cicd-bmi.bestclick.click"
+argocd_host  = "argocd-cicd.bestclick.click"
+domain_name  = "bestclick.click"
 
 github_repo = "abip007/eks-argocd-3tier-cicd"
 git_branch  = "main"
 
 # Your public IP for the SonarQube UI (curl https://checkip.amazonaws.com)
 admin_cidrs = ["203.0.113.10/32"]
+
+# Lock the Kubernetes API to your IP too (default: open to all)
+# api_public_access_cidrs = ["203.0.113.10/32"]
+
+# An account has only one GitHub OIDC provider. If it already exists:
+#   aws iam list-open-id-connect-providers
+# github_oidc_provider_arn = "arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com"
 
 # Don't put the token here - pass it from the environment instead:
 #   export TF_VAR_github_token=github_pat_xxx

@@ -7,7 +7,7 @@ variable "region" {
 variable "aws_profile" {
   description = "AWS CLI profile. null = default credential chain."
   type        = string
-  default     = "abip007"
+  default     = "abip007home"
 }
 
 variable "name" {
@@ -24,17 +24,116 @@ variable "tags" {
   }
 }
 
-# ---------- Existing platform (from eks-argocd-3tier) ----------
+# ---------- EKS cluster (created by this project) ----------
 variable "cluster_name" {
-  description = "Existing EKS cluster with Argo CD, LB Controller and ExternalDNS installed."
+  description = "EKS cluster name. Prefixes the VPC, IAM roles and policies. Different from eks-argocd-3tier's argo-eks so both projects can live in one account."
   type        = string
-  default     = "argo-eks"
+  default     = "bmi-cicd-eks"
+}
+
+variable "kubernetes_version" {
+  type    = string
+  default = "1.36"
+}
+
+variable "vpc_cidr" {
+  description = "VPC CIDR (3 public /20 + 3 private /19 across 3 AZs)."
+  type        = string
+  default     = "10.2.0.0/16"
+}
+
+variable "single_nat_gateway" {
+  description = "true = one NAT gateway (cheap). false = one per AZ (HA)."
+  type        = bool
+  default     = true
+}
+
+variable "api_public_access_cidrs" {
+  description = "CIDRs allowed to reach the public Kubernetes API, e.g. [\"203.0.113.10/32\"]. Your PC must be in it: Terraform runs kubectl/helm from there."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "node_instance_types" {
+  description = "Free-plan eligible: m7i-flex.large / c7i-flex.large = 29 pods/node, t3.small = 11."
+  type        = list(string)
+  default     = ["m7i-flex.large"]
+}
+
+variable "node_min_size" {
+  type    = number
+  default = 2
+}
+
+variable "node_desired_size" {
+  type    = number
+  default = 2
+}
+
+variable "node_max_size" {
+  type    = number
+  default = 4
+}
+
+# ---------- DNS / TLS ----------
+variable "domain_name" {
+  description = "Public Route 53 hosted zone in this account (ExternalDNS writes records here)."
+  type        = string
+  default     = "bestclick.click"
 }
 
 variable "app_host" {
   description = "Public hostname of this app. Must equal the Ingress host in gitops/bmi-cicd/overlays/prod."
   type        = string
   default     = "cicd-bmi.bestclick.click"
+}
+
+variable "argocd_host" {
+  description = "Public hostname of the Argo CD UI."
+  type        = string
+  default     = "argocd-cicd.bestclick.click"
+}
+
+variable "certificate_arn" {
+  description = "ACM certificate for domain + *.domain. Empty = newest ISSUED cert for domain_name."
+  type        = string
+  default     = ""
+}
+
+# ---------- Platform chart versions ----------
+variable "aws_lbc_version" {
+  description = "LB Controller release whose gateway CRDs are installed (policies/aws-load-balancer-controller.json matches v3.6.0)."
+  type        = string
+  default     = "v3.6.0"
+}
+
+variable "gateway_api_version" {
+  type    = string
+  default = "v1.6.0"
+}
+
+variable "aws_lbc_chart_version" {
+  description = "null = latest."
+  type        = string
+  default     = null
+}
+
+variable "external_dns_chart_version" {
+  description = "null = latest."
+  type        = string
+  default     = null
+}
+
+variable "argocd_chart_version" {
+  description = "argo-cd Helm chart version; null = latest."
+  type        = string
+  default     = null
+}
+
+variable "argocd_apps_chart_version" {
+  description = "argocd-apps Helm chart version; null = latest."
+  type        = string
+  default     = null
 }
 
 # ---------- GitHub ----------

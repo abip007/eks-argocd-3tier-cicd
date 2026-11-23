@@ -19,3 +19,8 @@ reports/
 pipeline/local.env
 cli/.out/
 cli/ids.env
+
+# Terraform-managed cluster access
+.helm/
+.kubeconfig-*
+terraform/imports.tf
