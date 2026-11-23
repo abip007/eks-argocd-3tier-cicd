@@ -94,6 +94,12 @@ variable "argocd_host" {
   default     = "argocd-cicd.bestclick.click"
 }
 
+variable "external_dns_zone_id" {
+  description = "Route 53 zone ID ExternalDNS may write to. Set it when the account has several zones with the same name, or records land in a zone nobody queries. Use the zone whose name servers match: nslookup -type=ns <domain>."
+  type        = string
+  default     = ""
+}
+
 variable "certificate_arn" {
   description = "ACM certificate for domain + *.domain. Empty = newest ISSUED cert for domain_name."
   type        = string

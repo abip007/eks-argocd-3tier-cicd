@@ -7,6 +7,10 @@ app_host     = "cicd-bmi.bestclick.click"
 argocd_host  = "argocd-cicd.bestclick.click"
 domain_name  = "bestclick.click"
 
+# Several hosted zones with the same name? Pin ExternalDNS to the live one
+# (its name servers match: nslookup -type=ns bestclick.click)
+# external_dns_zone_id = "Z0123456789ABCDEFGHIJ"
+
 github_repo = "abip007/eks-argocd-3tier-cicd"
 git_branch  = "main"
 

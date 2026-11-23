@@ -88,6 +88,7 @@ resource "helm_release" "external_dns" {
     provider       = { name = "aws" }
     env            = [{ name = "AWS_DEFAULT_REGION", value = var.region }]
     domainFilters  = [var.domain_name]
+    extraArgs      = var.external_dns_zone_id == "" ? [] : ["--zone-id-filter=${var.external_dns_zone_id}"]
     policy         = "upsert-only"
     txtOwnerId     = var.cluster_name
     sources        = ["ingress"]
