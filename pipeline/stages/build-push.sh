@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Stage: BuildPush. Only runs after the quality gate passed.
-#  1. docker build + push both images to ECR with a unique tag
+#  1. docker build both images, scan each with Trivy (HIGH/CRITICAL with a fix
+#     fails the build), then push to ECR with a unique tag. A vulnerable image
+#     never reaches ECR.
 #  2. write that tag into gitops/bmi-cicd/overlays/prod/kustomization.yaml and
 #     push the commit -> Argo CD deploys it (nobody runs kubectl)
 # The commit only touches gitops/, which is not in the pipeline's trigger paths,
@@ -18,11 +20,18 @@ REGISTRY="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
 COMMIT="${COMMIT_ID:-$(git rev-parse HEAD 2>/dev/null || echo manual000)}"
 TAG="${COMMIT:0:7}-${CODEBUILD_BUILD_NUMBER:-$(date +%Y%m%d%H%M%S)}"
 
-say "1. Build and push images ($TAG)"
+say "1. Build, scan and push images ($TAG)"
+install_trivy
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
 for c in backend frontend; do
-  docker build --platform linux/amd64 -t "$REGISTRY/$ECR_PREFIX-$c:$TAG" "app/$c"
-  docker push "$REGISTRY/$ECR_PREFIX-$c:$TAG"
+  IMG="$REGISTRY/$ECR_PREFIX-$c:$TAG"
+  docker build --platform linux/amd64 -t "$IMG" "app/$c"
+  echo "--- Trivy image scan: $c (${TRIVY_SEVERITY:-HIGH,CRITICAL}, fixable)"
+  trivy image --cache-dir .tools/trivy-cache --ignorefile .trivyignore \
+    --scanners vuln,secret --severity "${TRIVY_SEVERITY:-HIGH,CRITICAL}" --ignore-unfixed \
+    --exit-code 1 "$IMG" \
+    || die "image $c has HIGH/CRITICAL vulnerabilities with a fix - not pushed. Update the base image or dependency, or accept it in .trivyignore."
+  docker push "$IMG"
 done
 
 say "2. Bump image tag in Git ($GITHUB_REPO@$GIT_BRANCH)"

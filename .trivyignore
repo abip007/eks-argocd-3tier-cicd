@@ -1,0 +1,5 @@
+# Findings accepted on purpose. One ID per line (CVE-…, AVD-…/misconfig ID,
+# or a secret rule ID), each with the reason and a review date, e.g.:
+#
+#   # no fix upstream yet, not reachable from our code - review 2027-01-31
+#   CVE-2026-00000

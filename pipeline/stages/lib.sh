@@ -27,5 +27,26 @@ jfield() {
     });' "$1"
 }
 
+# Install a pinned Trivy release into .tools/ unless it's already on PATH.
+# Version + SHA-256 are fixed here on purpose: a moved tag or tampered release
+# asset fails the checksum instead of running in the pipeline. To upgrade, take
+# both values from trivy_<ver>_checksums.txt of a release at least 2 weeks old.
+TRIVY_VERSION="${TRIVY_VERSION:-0.76.2}"
+TRIVY_SHA256="${TRIVY_SHA256:-bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf}"
+install_trivy() {
+  if command -v trivy >/dev/null; then TRIVY_CONTRIB=""; trivy --version | head -1; return; fi
+  local dir=.tools/trivy-$TRIVY_VERSION tgz
+  tgz="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+  if [ ! -x "$dir/trivy" ]; then
+    mkdir -p "$dir"
+    curl -fsSL -o "$dir/$tgz" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/$tgz"
+    echo "$TRIVY_SHA256  $dir/$tgz" | sha256sum -c - >/dev/null || die "Trivy download failed its SHA-256 check"
+    tar -xzf "$dir/$tgz" -C "$dir" && rm -f "$dir/$tgz"
+  fi
+  export PATH="$PWD/$dir:$PATH"
+  TRIVY_CONTRIB="$PWD/$dir/contrib"   # junit.tpl for CodeBuild test reports
+  trivy --version | head -1
+}
+
 # SonarQube Web API call (token as basic-auth user, empty password).
 sonar_api() { curl -fsS -u "${SONAR_TOKEN:?}:" "${SONAR_HOST_URL:?}/api/$1"; }

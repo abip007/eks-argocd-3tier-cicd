@@ -1,6 +1,7 @@
 # GitHub Actions pipeline
 
-`.github/workflows/ci-cd.yml` runs the same stages as CodePipeline, using the same scripts in
+`.github/workflows/ci-cd.yml` runs the same stages as CodePipeline (unit tests, SonarQube,
+Trivy, build, smoke test), using the same scripts in
 `pipeline/stages/`. Use it **instead of** CodePipeline, not alongside it. If both run, each one
 builds and commits its own release for the same push.
 
@@ -10,9 +11,13 @@ push to main (app/**, pipeline/**, tests/**, sonar-project.properties, the workf
    ▼
 ┌────────────┐   ┌──────────────────────────┐   ┌──────────────────────┐   ┌────────────┐
 │ unit-tests │──►│       code-quality       │──►│      build-push      │──►│ smoke-test │
-│ coverage   │   │ sonar-scan + quality-gate│   │ ECR + gitops tag bump│   │ live URL   │
-└────────────┘   └──────────────────────────┘   └──────────────────────┘   └────────────┘
- also on PRs       main only (needs AWS)           main only                  main only
+│ coverage   │   │ sonar-scan + quality-gate│ ┌►│ Trivy image scan,    │   │ live URL   │
+└────────────┘   └──────────────────────────┘ │ │ ECR + gitops tag bump│   └────────────┘
+ also on PRs       main only (needs AWS)      │ └──────────────────────┘    main only
+┌───────────────┐                             │      main only
+│ security-scan │─────────────────────────────┘
+│ Trivy fs      │  also on PRs (no AWS needed)
+└───────────────┘
 ```
 
 | | CodePipeline | GitHub Actions |
@@ -21,12 +26,13 @@ push to main (app/**, pipeline/**, tests/**, sonar-project.properties, the workf
 | `SONAR_TOKEN` | Secrets Manager `bmi-cicd/ci` | same secret, read by the job |
 | Release commit to `gitops/` | PAT in `bmi-cicd/ci:github_token` | built-in `GITHUB_TOKEN` (or the `GITOPS_TOKEN` secret) |
 | Reaching SonarQube | SG allows CodeBuild IP ranges | job adds its runner IP to the SG, removes it at the end |
-| Reports | CodeBuild Reports | run summary + `unit-test-reports` / `smoke-test-report` artifacts |
+| Trivy | `SecurityScan` action + image scan in BuildPush | `security-scan` job + the same image scan in `build-push` |
+| Reports | CodeBuild Reports | run summary + `unit-test-reports` / `trivy-report` / `smoke-test-report` artifacts |
 
 ## Prerequisites
 
-The Terraform, CLI or console guide is done: ECR repos, the `bmi-cicd/ci` secret with a
-`sonar_token`, the SonarQube server and the Argo CD app all exist.
+The Terraform, CLI or console guide is done: the EKS cluster with Argo CD, ECR repos, the
+`bmi-cicd/ci` secret with a `sonar_token`, the SonarQube server and the Argo CD app all exist.
 
 ## 1. Create the AWS role
 
@@ -111,8 +117,11 @@ artifacts.
 
 ## Notes
 
-- **Pull requests** run only `unit-tests`. SonarQube Community Edition has one branch, so a PR
-  scan would overwrite the `main` analysis. PRs from forks don't get AWS credentials anyway.
+- **Pull requests** run `unit-tests` and `security-scan` (Trivy needs no AWS access), so a PR
+  that adds a vulnerable dependency or a secret goes red before it's merged. No SonarQube scan on
+  PRs: Community Edition has one branch, so a PR scan would overwrite the `main` analysis.
+- **Trivy** is downloaded by the stage script at a pinned version and checked against its
+  SHA-256 (`pipeline/stages/lib.sh`). No third-party Trivy action is used.
 - **Why the SG step:** GitHub-hosted runners use thousands of IP ranges, too many for a security
   group. The job adds its own `/32` (tagged with the run ID) and removes it in an `always()`
   step. If a run is killed hard, a stale `gha-run-*` rule can remain. Delete it in the console.

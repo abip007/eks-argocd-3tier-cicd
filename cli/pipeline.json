@@ -58,6 +58,16 @@
             }
           },
           {
+            "name": "SecurityScan",
+            "runOrder": 1,
+            "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },
+            "inputArtifacts": [{ "name": "SourceOutput" }],
+            "configuration": {
+              "ProjectName": "${NAME}",
+              "EnvironmentVariables": "[{\"name\":\"STAGE\",\"value\":\"security-scan\",\"type\":\"PLAINTEXT\"}]"
+            }
+          },
+          {
             "name": "QualityGate",
             "runOrder": 2,
             "actionTypeId": { "category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1" },

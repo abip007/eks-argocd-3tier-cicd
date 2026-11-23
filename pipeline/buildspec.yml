@@ -3,8 +3,9 @@
 #
 #   UnitTests    STAGE=unit-test     tests + coverage thresholds (80%)
 #   SonarScan    STAGE=sonar-scan    SonarQube analysis (with the coverage)
+#   SecurityScan STAGE=security-scan Trivy: dependency CVEs, secrets, IaC misconfig
 #   QualityGate  STAGE=quality-gate  waits for SonarQube, fails if the gate is red
-#   BuildPush    STAGE=build-push    docker build/push to ECR, bump tag in gitops/
+#   BuildPush    STAGE=build-push    docker build, Trivy image scan, push to ECR, bump tag in gitops/
 #   SmokeTest    STAGE=smoke-test    waits for Argo CD to roll out, tests the live URL
 #
 # The stage scripts are plain bash; you can run them on your PC too (see README).
@@ -49,4 +50,8 @@ reports:
   smoke-tests:
     files:
       - reports/smoke-junit.xml
+    file-format: JUNITXML
+  security-scan:
+    files:
+      - reports/trivy-junit.xml
     file-format: JUNITXML

@@ -1,5 +1,5 @@
 # The pipeline:
-#   Source -> Test (UnitTests) -> CodeQuality (SonarScan -> QualityGate)
+#   Source -> Test (UnitTests) -> CodeQuality (SonarScan + SecurityScan -> QualityGate)
 #          -> Build (BuildPush: ECR + gitops commit) -> Verify (SmokeTest)
 
 # ---------- GitHub connection ----------
@@ -82,11 +82,12 @@ resource "aws_iam_role_policy" "pipeline" {
 locals {
   # CodeBuild action configuration for one stage script.
   build_action = { for stage, env in {
-    "unit-test"    = {}
-    "sonar-scan"   = { COMMIT_ID = "#{SourceVariables.CommitId}" }
-    "quality-gate" = { SONAR_CE_TASK_ID = "#{SonarScan.SONAR_CE_TASK_ID}" }
-    "build-push"   = { COMMIT_ID = "#{SourceVariables.CommitId}" }
-    "smoke-test"   = { IMAGE_TAG = "#{Build.IMAGE_TAG}" }
+    "unit-test"     = {}
+    "sonar-scan"    = { COMMIT_ID = "#{SourceVariables.CommitId}" }
+    "security-scan" = {}
+    "quality-gate"  = { SONAR_CE_TASK_ID = "#{SonarScan.SONAR_CE_TASK_ID}" }
+    "build-push"    = { COMMIT_ID = "#{SourceVariables.CommitId}" }
+    "smoke-test"    = { IMAGE_TAG = "#{Build.IMAGE_TAG}" }
     } : stage => {
     ProjectName = aws_codebuild_project.ci.name
     EnvironmentVariables = jsonencode([
@@ -167,6 +168,17 @@ resource "aws_codepipeline" "this" {
       namespace       = "SonarScan"
       input_artifacts = ["SourceOutput"]
       configuration   = local.build_action["sonar-scan"]
+    }
+    # Trivy: dependency CVEs, secrets, IaC misconfig. Runs in parallel with SonarScan.
+    action {
+      name            = "SecurityScan"
+      category        = "Build"
+      owner           = "AWS"
+      provider        = "CodeBuild"
+      version         = "1"
+      run_order       = 1
+      input_artifacts = ["SourceOutput"]
+      configuration   = local.build_action["security-scan"]
     }
     action {
       name            = "QualityGate"

@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/eksctl-io/eksctl/main/pkg/apis/eksctl.io/v1alpha5/assets/schema.json
+# eksctl cluster definition for the command-line guide (docs/02, Step 1).
+# Same cluster as terraform/: VPC 10.2.0.0/16 across 3 AZs (public + private
+# subnets, tagged for ALBs), control plane, add-ons, private node group.
+# Change the account ID in the two policy ARNs if yours differs.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: bmi-cicd-eks
+  region: ap-south-1
+  version: "1.36"
+  tags:
+    managed-by: eksctl
+    project: eks-argocd-3tier-cicd
+
+vpc:
+  cidr: 10.2.0.0/16
+  nat:
+    gateway: Single              # HighlyAvailable = one NAT per AZ (~3x cost)
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+  # publicAccessCIDRs: ["203.0.113.10/32"]   # lock the API to your IP
+
+accessConfig:
+  authenticationMode: API        # EKS access entries, no aws-auth ConfigMap
+
+addons:
+  - name: vpc-cni
+    configurationValues: '{"enableNetworkPolicy":"true"}'
+  - name: kube-proxy
+  - name: coredns
+  - name: eks-pod-identity-agent
+  - name: metrics-server         # needed by the backend HPA
+  - name: aws-ebs-csi-driver     # Postgres volume
+    podIdentityAssociations:
+      - namespace: kube-system
+        serviceAccountName: ebs-csi-controller-sa
+        permissionPolicyARNs:
+          - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+# Controller permissions via EKS Pod Identity. The two policies are created from
+# policies/*.json first (docs/02, Step 1.1).
+iam:
+  podIdentityAssociations:
+    - namespace: kube-system
+      serviceAccountName: aws-load-balancer-controller
+      permissionPolicyARNs:
+        - arn:aws:iam::014882039467:policy/bmi-cicd-eks-lbc
+    - namespace: external-dns
+      serviceAccountName: external-dns
+      permissionPolicyARNs:
+        - arn:aws:iam::014882039467:policy/bmi-cicd-eks-external-dns
+
+managedNodeGroups:
+  - name: general
+    amiFamily: AmazonLinux2023
+    instanceType: m7i-flex.large   # free-plan eligible, 29 pods/node
+    minSize: 2
+    desiredCapacity: 2
+    maxSize: 4
+    volumeSize: 20
+    privateNetworking: true      # nodes in private subnets, egress via NAT
+    labels: { role: general }
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator"]

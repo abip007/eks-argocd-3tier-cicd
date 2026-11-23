@@ -1,0 +1,19 @@
+# Helm values for the external-dns chart (console and CLI guides; Terraform:
+# terraform/platform.tf). Creates a Route 53 record for every Ingress host.
+provider:
+  name: aws
+env:
+  - name: AWS_DEFAULT_REGION
+    value: ap-south-1
+domainFilters: [bestclick.click]
+# Write only to the zone the registrar delegates to. If the account has two zones
+# with the same name, records otherwise land in a zone nobody queries.
+# Find it: nslookup -type=ns bestclick.click, then match the name servers in Route 53.
+extraArgs:
+  - --zone-id-filter=Z070283435VR70B93SKIX
+policy: upsert-only          # never deletes records (delete them by hand after teardown)
+txtOwnerId: bmi-cicd-eks     # marks records as owned by this cluster
+sources: [ingress]
+serviceAccount:
+  create: true
+  name: external-dns         # must equal the Pod Identity association

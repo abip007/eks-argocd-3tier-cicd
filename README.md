@@ -11,17 +11,18 @@ git push (app/**, tests/**, pipeline/**)
 ┌────────┐  ┌───────────┐  ┌──────────────────────────┐  ┌──────────────────┐  ┌────────────┐
 │ Source │─►│   Test    │─►│       CodeQuality        │─►│      Build       │─►│   Verify   │
 │ GitHub │  │ UnitTests │  │ SonarScan ─► QualityGate │  │    BuildPush     │  │ SmokeTest  │
+│        │  │           │  │ SecurityScan (Trivy)     │  │                  │  │            │
 └────────┘  └───────────┘  └──────────────────────────┘  └──────────────────┘  └────────────┘
-             Jest + Vitest   upload analysis   wait for     docker build/push    wait until the
-             coverage ≥ 80%  + coverage to     SonarQube,   to ECR, commit new   live app reports
-             (fails below)   SonarQube         fail if red  tag to gitops/ ──┐   the new version,
-                                                                              │   then 7 HTTP checks
-                             Argo CD (in bmi-cicd-eks)           ◄──────────┘   against the public URL
+             Jest + Vitest   SonarQube analysis +      docker build, Trivy  wait until the
+             coverage ≥ 80%  gate; Trivy: CVEs in      image scan, push to  live app reports
+             (fails below)   deps, secrets, IaC        ECR, commit new      the new version,
+                                                       tag to gitops/ ──┐   then 7 HTTP checks
+                             Argo CD (in bmi-cicd-eks) ◄────────────────┘   against the public URL
                              syncs gitops/bmi-cicd → namespace bmi-cicd
 ```
 
-Every stage can stop a release. Failing tests, coverage under 80% or a red quality gate
-mean no image is built. If the smoke test fails, the pipeline goes red and the
+Every stage can stop a release. Failing tests, coverage under 80%, a red quality gate or a
+Trivy finding mean no image is built, and an image with a fixable HIGH/CRITICAL CVE is never pushed. If the smoke test fails, the pipeline goes red and the
 team knows the release is broken. To roll back, `git revert` the release commit.
 
 | What | Where |
@@ -31,6 +32,7 @@ team knows the release is broken. To roll back, `git revert` the release commit.
 | **Smoke tests (new)**: curl checks against the live URL | `tests/smoke/smoke.sh` |
 | Pipeline definition: one buildspec + one bash script per stage | `pipeline/` |
 | SonarQube analysis settings | `sonar-project.properties` |
+| **Security scan (Trivy)**: dependency CVEs, secrets, IaC misconfig, image CVEs | `pipeline/stages/security-scan.sh`, `.trivyignore` |
 | SonarQube server bootstrap (EC2 user data) and one-time setup | `sonarqube/` |
 | Kubernetes manifests Argo CD deploys | `gitops/bmi-cicd/`, `gitops/argocd/bmi-cicd-app.yaml` |
 | Terraform for everything above | `terraform/` |
@@ -60,8 +62,9 @@ Nothing here depends on the eks-argocd-3tier project. Its names (`argo-eks`, `ar
 
 1. A **Route 53 public hosted zone** (`bestclick.click`) and an **ISSUED ACM certificate** for
    `bestclick.click` + `*.bestclick.click` in the region. Terraform looks both up, it doesn't create them.
-   The console and CLI guides still expect a cluster with Argo CD, the LB Controller and
-   ExternalDNS to exist already; the Terraform path creates it.
+   Every path creates the cluster, Argo CD and the rest itself.
+   Only **one** public hosted zone for the domain, please: with duplicates, ExternalDNS may
+   write records into a zone nobody queries (or pin it with `external_dns_zone_id`).
 2. A GitHub repo for this project: `abip007/eks-argocd-3tier-cicd`, **public**, because Argo CD
    reads it without credentials.
    ```bash
@@ -74,8 +77,8 @@ Nothing here depends on the eks-argocd-3tier project. Its names (`argo-eks`, `ar
    *Generate new token* → Repository access: *Only select repositories* →
    `eks-argocd-3tier-cicd` → Permissions → **Contents: Read and write**. The BuildPush stage uses it
    to commit the new image tag.
-4. Tools on your PC: AWS CLI v2, kubectl, Git Bash, and Terraform ≥ 1.6 for the Terraform path
-   (Terraform runs `aws` and `kubectl` itself, so both must be on PATH).
+4. Tools on your PC: AWS CLI v2, kubectl, Git Bash, plus Terraform ≥ 1.6 (Terraform path) or
+   eksctl + Helm 3 (CLI path). The console path needs nothing: it uses CloudShell.
    Docker is only needed to run the stage scripts locally.
 
 ### Your values
@@ -84,22 +87,28 @@ These values are in the files. Change them if yours differ:
 
 | Value | Default | Files |
 | --- | --- | --- |
-| Region / profile | `ap-south-1` / `abip007` | `cli/config.env`, `terraform/terraform.tfvars` |
+| Region / profile | `ap-south-1` / `abip007home` | `cli/config.env`, `terraform/terraform.tfvars` |
+| Account ID | `014882039467` | `eksctl/cluster.yaml` (policy ARNs), overlay `kustomization.yaml` (cert ARN) |
+| Cluster / VPC | `bmi-cicd-eks` / `10.2.0.0/16` | `cli/config.env`, `eksctl/cluster.yaml`, tfvars |
+| Argo CD host | `argocd-cicd.bestclick.click` | `platform/argocd-values.yaml`, `cli/config.env`, tfvars |
+| Route 53 zone ID (only with duplicate zones) | `Z070283435VR70B93SKIX` | `platform/external-dns-values.yaml`, tfvars `external_dns_zone_id` |
 | App host | `cicd-bmi.bestclick.click` | `gitops/bmi-cicd/overlays/prod/kustomization.yaml` (2×), `cli/config.env`, tfvars |
-| ACM certificate ARN | wildcard cert of `bestclick.click` | overlay `kustomization.yaml` |
+| ACM certificate ARN | wildcard cert of `bestclick.click` | overlay `kustomization.yaml`, `platform/argocd-values.yaml` (Terraform looks it up) |
 | GitHub repo | `abip007/eks-argocd-3tier-cicd` | `gitops/argocd/bmi-cicd-app.yaml`, `cli/config.env`, tfvars |
-| Initial images | last `bmi-app` release | overlay `kustomization.yaml` (replaced by the first pipeline run) |
+| Image tags | written by every pipeline run | overlay `kustomization.yaml` (`ImagePullBackOff` on a fresh account until the first BuildPush) |
 
 ## Three ways to build it (pick one)
 
 | Path | Guide |
 | --- | --- |
-| AWS Console, click by click | [docs/01-console-guide.md](docs/01-console-guide.md) |
-| AWS CLI, one command at a time | [docs/02-command-line-guide.md](docs/02-command-line-guide.md) |
-| Terraform | [docs/03-terraform-guide.md](docs/03-terraform-guide.md) |
+| AWS Console, click by click (+ CloudShell for Helm/kubectl) | [docs/01-console-guide.md](docs/01-console-guide.md) |
+| AWS CLI + eksctl + Helm, one command at a time | [docs/02-command-line-guide.md](docs/02-command-line-guide.md) |
+| Terraform, one apply | [docs/03-terraform-guide.md](docs/03-terraform-guide.md) |
 | GitHub Actions instead of CodePipeline (after one of the above) | [docs/04-github-actions-guide.md](docs/04-github-actions-guide.md) |
 
-All three use the same names (`bmi-cicd-*`), so **don't mix paths in one account**.
+Each path builds **everything**: VPC + EKS cluster, LB Controller, ExternalDNS, Argo CD, the app,
+SonarQube, and the pipeline with unit tests, SonarQube, Trivy and smoke tests. All three use the
+same names (`bmi-cicd-*`), so **don't mix paths in one account**.
 Every path has one manual click: approving the GitHub connection in the console.
 
 ## How each quality check works
@@ -125,6 +134,19 @@ processed that exact analysis, then reads `api/qualitygates/project_status`. If 
 | New issues | new code | > 0 |
 | Security hotspots reviewed | new code | < 100% |
 | Reliability / Security / Maintainability rating | whole code | worse than A |
+
+**Security scan (Trivy).** Two layers, both with Trivy pinned to one version and SHA-256 in
+`pipeline/stages/lib.sh`:
+
+| Layer | Where | Scans | Fails on |
+| --- | --- | --- | --- |
+| Repo | `SecurityScan` action (parallel to SonarScan), `security-scan.sh` | `package-lock.json` CVEs, committed secrets, Dockerfiles / `gitops/` manifests / Terraform | any secret; HIGH/CRITICAL CVE that has a fix |
+| Image | `BuildPush`, before `docker push` | OS packages + node modules inside each built image | HIGH/CRITICAL CVE that has a fix (image not pushed) |
+
+Misconfigurations are printed but don't fail the build until you set `TRIVY_MISCONFIG_GATE=true`
+on the action. `TRIVY_SEVERITY` (default `HIGH,CRITICAL`) changes the threshold. To accept a
+finding, add its ID to `.trivyignore` with the reason and a review date. CodeBuild shows the
+results under **Reports** (`security-scan`).
 
 **Smoke test.** Argo CD deploys on its own schedule, so `smoke-test.sh` first polls
 `GET /api/health` until the live `version` equals the pipeline's `IMAGE_TAG` (max 15 min). The
@@ -156,6 +178,7 @@ The stage scripts are plain bash. You need Node 20 for tests, or run them in Doc
 cp pipeline/local.env.example pipeline/local.env     # fill in SONAR_HOST_URL, SONAR_TOKEN, ...
 bash pipeline/stages/unit-test.sh
 bash pipeline/stages/sonar-scan.sh && bash pipeline/stages/quality-gate.sh
+bash pipeline/stages/security-scan.sh               # Trivy (Linux/WSL; downloads a pinned Trivy)
 bash tests/smoke/smoke.sh https://cicd-bmi.bestclick.click
 
 # without Node installed:
@@ -170,7 +193,10 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W)":/repo -w /repo node:20 bash pi
 | Elastic IP | ~$0.005/h |
 | CodePipeline V2 | $0.002 per action-minute (~$0.02 per run) |
 | CodeBuild small | 100 free minutes/month, then ~$0.005/min (~8 min per run) |
-| ALB | none extra, it joins the existing shared ALB |
+| EKS control plane | ~$0.10/h |
+| 2 × m7i-flex.large nodes | ~$0.20/h together (free-plan eligible) |
+| NAT gateway | ~$0.056/h + data |
+| ALB (shared by the app and Argo CD) | ~$0.025/h + LCU |
 
 ## Tear down
 

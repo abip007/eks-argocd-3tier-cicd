@@ -1,11 +1,12 @@
 # GitHub Actions version of the CodePipeline. Same stages, same scripts:
 # every job calls pipeline/stages/<stage>.sh, exactly like pipeline/buildspec.yml.
 #
-#   unit-tests ─► code-quality ─► build-push ─► smoke-test
-#   coverage≥80%  SonarScan +     ECR images +   wait for Argo CD,
-#                 QualityGate     gitops tag     test the live URL
+#   unit-tests ─► code-quality ──┬─► build-push ─► smoke-test
+#   coverage≥80%  SonarScan +    │   Trivy image    wait for Argo CD,
+#                 QualityGate    │   scan, ECR +    test the live URL
+#   security-scan (Trivy fs) ────┘   gitops tag
 #
-# Pull requests run only unit-tests (no AWS access, no SonarQube upload: the
+# Pull requests run only unit-tests and security-scan (no AWS access, no SonarQube upload: the
 # Community Edition has one branch, so PR scans would overwrite main's analysis).
 # Pushes to main run all four jobs.
 #
@@ -102,6 +103,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # ------------------------------------------------------------ SecurityScan
+  # Trivy: dependency CVEs, secrets, IaC misconfig. No AWS access, so PRs run it too.
+  security-scan:
+    name: Trivy security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy fs scan (fails on secrets / fixable HIGH+CRITICAL CVEs)
+        run: bash pipeline/stages/security-scan.sh
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: reports/trivy-junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
   # ------------------------------------------------ SonarScan + QualityGate
   code-quality:
     name: SonarQube scan + quality gate
@@ -177,8 +199,8 @@ jobs:
 
   # ---------------------------------------------------------------- BuildPush
   build-push:
-    name: Build + push images, bump gitops tag
-    needs: code-quality
+    name: Build + scan + push images, bump gitops tag
+    needs: [code-quality, security-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

@@ -24,3 +24,6 @@ cli/ids.env
 .helm/
 .kubeconfig-*
 terraform/imports.tf
+
+# Pipeline tools downloaded by the stage scripts (Trivy)
+.tools/
