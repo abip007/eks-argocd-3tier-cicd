@@ -86,6 +86,11 @@ resource "helm_release" "argocd_app" {
 # On 'terraform destroy' this runs FIRST: delete the Argo CD Application (so the
 # LB Controller removes the ALB) and the app namespace (frees the EBS volume)
 # while the controllers are still running. Otherwise the VPC can't be deleted.
+# depends_on below lists everything that must still exist while it runs:
+# destroy goes in reverse order, so none of these is touched until it's done.
+# Without the network entries, Terraform deleted the NAT gateway in parallel;
+# Argo CD then couldn't reach GitHub, the LB Controller couldn't reach the AWS
+# API, and the ALB kept the public subnets and internet gateway from deleting.
 resource "terraform_data" "app_teardown" {
   input = { kubeconfig = local.kubeconfig_path, name = var.name }
 
@@ -97,5 +102,25 @@ resource "terraform_data" "app_teardown" {
     ])
   }
 
-  depends_on = [helm_release.argocd_app, kubernetes_namespace_v1.app, terraform_data.gateway_crds]
+  depends_on = [
+    # what it deletes
+    helm_release.argocd_app,
+    kubernetes_namespace_v1.app,
+    # who does the deleting: Argo CD, the LB Controller (+ its AWS credentials), EBS CSI
+    helm_release.argocd,
+    helm_release.aws_load_balancer_controller,
+    helm_release.external_dns,
+    aws_eks_pod_identity_association.controller,
+    aws_eks_addon.ebs_csi,
+    aws_eks_addon.pod_identity_agent,
+    terraform_data.gateway_crds,
+    # their way out to GitHub and the AWS APIs, and the subnets the ALB lives in
+    aws_route.private_nat,
+    aws_route.public_internet,
+    aws_route_table_association.public,
+    aws_route_table_association.private,
+    aws_nat_gateway.this,
+    aws_internet_gateway.this,
+    aws_subnet.public,
+  ]
 }
