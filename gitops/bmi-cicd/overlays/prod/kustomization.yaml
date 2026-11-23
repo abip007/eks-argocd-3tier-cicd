@@ -13,11 +13,11 @@ resources:
 
 images:
   - name: bmi-backend
-    newName: 014882039467.dkr.ecr.ap-south-1.amazonaws.com/bmi-backend
-    newTag: e3797ed-20261109192753
+    newName: 014882039467.dkr.ecr.ap-south-1.amazonaws.com/bmi-cicd-backend
+    newTag: b55bbff-7
   - name: bmi-frontend
-    newName: 014882039467.dkr.ecr.ap-south-1.amazonaws.com/bmi-frontend
-    newTag: e3797ed-20261109192753
+    newName: 014882039467.dkr.ecr.ap-south-1.amazonaws.com/bmi-cicd-frontend
+    newTag: b55bbff-7
 
 patches:
   - target: { kind: ConfigMap, name: backend-config }
@@ -27,7 +27,7 @@ patches:
         value: https://cicd-bmi.bestclick.click
       - op: replace
         path: /data/APP_VERSION
-        value: "initial"  # app-version
+        value: "b55bbff-7"  # app-version
   - target: { kind: Ingress, name: bmi }
     patch: |
       - op: replace
