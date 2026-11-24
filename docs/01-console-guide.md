@@ -1,7 +1,8 @@
 # Build everything from the AWS Console (step by step)
 
 This guide builds the whole project by clicking: the VPC and EKS cluster, the platform
-(Load Balancer Controller, ExternalDNS, Argo CD), the app, the SonarQube server, and the
+(Load Balancer Controller, ExternalDNS, Argo CD), the app with its observability stack
+(Prometheus, Alertmanager, Grafana, Loki, Alloy), the SonarQube server, and the
 CodePipeline with unit tests, SonarQube, Trivy and smoke tests. The result is the same as
 [Terraform](03-terraform-guide.md) and the [command-line guide](02-command-line-guide.md).
 
@@ -24,6 +25,7 @@ leave the browser.
 | Domain (Route 53 hosted zone) | `bestclick.click` |
 | App URL | `https://cicd-bmi.bestclick.click` |
 | Argo CD URL | `https://argocd-cicd.bestclick.click` |
+| Grafana URL | `https://grafana-cicd.bestclick.click` |
 | GitHub repo (pipeline source, watched by Argo CD) | `abip007/eks-argocd-3tier-cicd` |
 
 Before you start, finish the [Prerequisites](../README.md#prerequisites): the repo is on GitHub,
@@ -202,7 +204,12 @@ helm upgrade --install external-dns external-dns \
   --repo https://kubernetes-sigs.github.io/external-dns/ -n external-dns --create-namespace \
   -f platform/external-dns-values.yaml --wait
 
-# 8.4 Argo CD (UI on the shared ALB)
+# 8.4 Prometheus Operator CRDs (ServiceMonitor, PrometheusRule, ...). Before Argo CD,
+#     because Argo CD's own ServiceMonitors (8.5) and the app's need them.
+kubectl create namespace observability
+helm upgrade --install prometheus-operator-crds prometheus-operator-crds   --repo https://prometheus-community.github.io/helm-charts --version 33.0.1   -n observability --wait
+
+# 8.5 Argo CD (UI on the shared ALB, metrics on for Prometheus)
 helm upgrade --install argocd argo-cd \
   --repo https://argoproj.github.io/argo-helm -n argocd --create-namespace \
   -f platform/argocd-values.yaml --wait --timeout 15m
@@ -219,10 +226,12 @@ in as `admin` with the password above.
 
 # Part B: The app
 
-## Step 9: Secrets and the Argo CD Application (CloudShell)
+## Step 9: Secrets and the Argo CD root app (CloudShell)
 
-The DB secrets are created here, never stored in Git. The Application tells Argo CD to deploy
-`gitops/bmi-cicd/overlays/prod` from this repo.
+The DB and Grafana secrets are created here, never stored in Git. The **root** Application
+(app-of-apps) points Argo CD at `gitops/argocd/apps/`, and Argo CD creates the five apps in it:
+`bmi-cicd` (the app) and the observability stack `kube-prometheus-stack`, `loki`, `alloy`,
+`observability-extras`.
 
 ```bash
 kubectl create namespace bmi-cicd
@@ -233,13 +242,18 @@ kubectl -n bmi-cicd create secret generic postgres-secret \
 kubectl -n bmi-cicd create secret generic backend-secret \
   --from-literal=DATABASE_URL="postgres://bmi_user:$DB_PASS@bmi-postgres-svc:5432/bmidb"
 
-kubectl apply -f gitops/argocd/bmi-cicd-app.yaml
-kubectl -n argocd get application bmi-cicd -w      # Ctrl+C when Synced
+GRAFANA_PASS=$(openssl rand -hex 12)
+kubectl -n observability create secret generic grafana-admin   --from-literal=admin-user=admin --from-literal=admin-password="$GRAFANA_PASS"
+echo "Grafana: admin / $GRAFANA_PASS"            # note it down
+
+kubectl apply -f gitops/argocd/root-app.yaml
+kubectl -n argocd get applications -w             # Ctrl+C when all six are Synced
 ```
 
 Postgres starts at once. Backend and frontend show **ImagePullBackOff** until the pipeline's
 first BuildPush has pushed images to ECR (Step 14). That's expected on a fresh account.
-ExternalDNS creates `cicd-bmi.bestclick.click` as soon as the Ingress exists.
+ExternalDNS creates `cicd-bmi.bestclick.click` as soon as the Ingress exists, and
+`grafana-cicd.bestclick.click` once kube-prometheus-stack is synced (3–5 minutes).
 
 ---
 
@@ -459,6 +473,28 @@ The pipeline now reads:
 The release commit only touches `gitops/`, so it doesn't start another run. Argo CD deploys it
 within about a minute, and `https://cicd-bmi.bestclick.click` serves the new version.
 
+### Observability: what you get
+
+Open `https://grafana-cicd.bestclick.click`, log in as `admin` with the password from Step 9.
+
+| Where in Grafana | What it shows |
+| --- | --- |
+| **Dashboards → BMI → BMI app (CI/CD)** | live release (image tag), Argo CD sync and health, pods per version (each step is a release), request rate, 5xx ratio, p50/p95/p99 latency, CPU/memory per pod, Postgres volume free, logs |
+| **Dashboards → Kubernetes / …** | the chart's standard cluster, node, namespace and pod dashboards |
+| **Explore → Prometheus** | any metric, e.g. `sum by (route, status_code) (rate(http_request_duration_seconds_count{namespace="bmi-cicd"}[5m]))` |
+| **Explore → Loki** | every pod's logs and Kubernetes events, e.g. `{namespace="bmi-cicd", app="bmi-backend"} \| json \| status >= 500` |
+| **Alerting → Alert rules** | the chart's defaults plus `bmi-cicd`: backend down, 5xx > 5%, p95 > 1 s, Postgres volume < 15% free, Argo CD app out of sync / unhealthy, pods stuck on two versions |
+
+How it's wired: the backend serves `/metrics` (prom-client) and writes one JSON log line per
+request. A ServiceMonitor tells Prometheus to scrape it every 30 s; Alloy reads every pod's
+output and pushes it to Loki. `/metrics` is only reachable inside the cluster: the ALB and nginx
+route `/api/*` only. Alerts reach Alertmanager but aren't sent anywhere until you add a receiver
+(Slack, email) under `alertmanager.config` in
+[`gitops/observability/kube-prometheus-stack-values.yaml`](../gitops/observability/kube-prometheus-stack-values.yaml).
+
+After a release, the dashboard's **Live version** turns to the new tag within about a minute of
+the smoke test passing.
+
 ### What Trivy checks
 
 | Layer | Fails on | Doesn't fail on |
@@ -481,6 +517,11 @@ with the reason and a review date.
 | Ingress has no ADDRESS | Subnet tags (1.1) or the LBC Pod Identity association (5): `kubectl -n kube-system logs deploy/aws-load-balancer-controller` |
 | Postgres / PVC `Pending` | EBS CSI role (Step 3, item 6) or StorageClass (8.1) |
 | Backend/frontend `ImagePullBackOff` | Normal until the first BuildPush (Step 15) |
+| Argo CD apps show `ServiceMonitor ... no matches for kind` | The CRDs (8.4) weren't installed before Argo CD. Install them, then **Refresh** the app |
+| `kube-prometheus-stack` OutOfSync on webhooks / CRDs | Click **Sync** once; `ServerSideApply` is set, the webhook `caBundle` is ignored |
+| Grafana login fails | Secret `grafana-admin` must exist in `observability` before the first sync. Recreate it, then `kubectl -n observability rollout restart deploy/kube-prometheus-stack-grafana` |
+| Dashboard panels empty | Explore → Prometheus → `up{namespace="bmi-cicd"}`. 0 or nothing: Service label `app: bmi-backend` / port name `http` (ServiceMonitor) |
+| No logs in Loki | `kubectl -n observability logs deploy/alloy` and `kubectl -n observability get pods` (loki-0 Running) |
 | Host doesn't resolve | `kubectl -n external-dns logs deploy/external-dns`. If records went to a different zone ID than your registrar's: delete the duplicate zone or set `--zone-id-filter` (Step 6) |
 | SmokeTest: `live version: unreachable` for 15 min on the first run, app works in a browser | The DNS record was created after the test started, and CodeBuild's resolver cached the "no such name" answer. **Retry** the Verify stage |
 | Source: *connection is not available* | Step 13 status must be **Available** |
@@ -498,9 +539,12 @@ with the reason and a review date.
 
 1. CloudShell:
    ```bash
-   kubectl -n argocd delete application bmi-cicd --wait   # pods + Ingress rule
+   kubectl -n argocd delete application root --wait        # deletes all five child apps
    kubectl delete namespace bmi-cicd                       # Postgres EBS volume
-   helm -n argocd uninstall argocd                         # last Ingress -> ALB is deleted
+   kubectl delete pvc --all -n observability               # Prometheus, Alertmanager, Loki volumes
+   kubectl delete ingress --all -A                         # last Ingress -> ALB is deleted
+   helm -n argocd uninstall argocd
+   helm -n observability uninstall prometheus-operator-crds
    sleep 60
    helm -n external-dns uninstall external-dns
    helm -n kube-system uninstall aws-load-balancer-controller
@@ -515,4 +559,5 @@ with the reason and a review date.
    `AWSCodePipelineServiceRole-ap-south-1-bmi-cicd`; policies `bmi-cicd-eks-lbc`, `bmi-cicd-eks-external-dns`
    and the pipeline/CodeBuild customer-managed ones.
 9. **S3**: the `codepipeline-ap-south-1-…` bucket if nothing else uses it.
-10. **Route 53**: delete the `cicd-bmi` and `argocd-cicd` A/AAAA/TXT records (ExternalDNS is `upsert-only`).
+10. **Route 53**: delete the `cicd-bmi`, `argocd-cicd` and `grafana-cicd` A/AAAA/TXT records (ExternalDNS is `upsert-only`).
+11. **EC2 → Volumes**: no *available* volume named `bmi-cicd-eks-dynamic-pvc-…` should be left. Delete any that are.

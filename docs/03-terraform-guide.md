@@ -1,17 +1,17 @@
 # Build everything with Terraform
 
 [`terraform/`](../terraform) builds the whole project in **one apply** (about 25 minutes): the VPC
-and EKS cluster, the platform (Load Balancer Controller, ExternalDNS, Argo CD), the app's
-secrets and Argo CD Application, the SonarQube server, and the CodePipeline with unit tests,
-SonarQube, Trivy and smoke tests.
+and EKS cluster, the platform (Load Balancer Controller, ExternalDNS, Argo CD), the app and
+its observability stack (Prometheus, Alertmanager, Grafana, Loki, Alloy, deployed by Argo CD),
+the SonarQube server, and the CodePipeline with unit tests, SonarQube, Trivy and smoke tests.
 
 | File | Creates |
 | --- | --- |
 | `network.tf` | VPC `10.2.0.0/16`: 3 public + 3 private subnets (tagged for ALBs), one NAT gateway, S3 endpoint |
 | `eks.tf` | EKS cluster `bmi-cicd-eks` (1.36, API auth mode), add-ons (VPC CNI with network policy, CoreDNS, kube-proxy, Pod Identity agent, metrics-server, EBS CSI), node group 2 × m7i-flex.large |
 | `iam.tf` | Pod Identity roles for the LB Controller and ExternalDNS (from `policies/*.json`) and the EBS CSI driver |
-| `platform.tf` | ACM certificate lookup, `gp3` StorageClass, Gateway API CRDs, LB Controller, ExternalDNS, Argo CD (UI at `argocd_host`) |
-| `kubernetes.tf` | Namespace `bmi-cicd`, DB secrets (random password), Argo CD Application (`argocd-apps` chart), destroy-time teardown |
+| `platform.tf` | ACM certificate lookup, `gp3` StorageClass, Gateway API CRDs, LB Controller, ExternalDNS, namespace `observability` + Prometheus Operator CRDs, Argo CD (UI at `argocd_host`, metrics on) |
+| `kubernetes.tf` | Namespace `bmi-cicd`, DB secrets and Grafana admin secret (random passwords), Argo CD **root** app (`argocd-apps` chart) → everything in `gitops/argocd/apps/`, destroy-time teardown |
 | `sonarqube.tf` | EC2 in a public subnet of the VPC (`sonarqube/user-data.sh`), Elastic IP, security group (your IP + CodeBuild ranges), SSM role |
 | `ecr-secrets.tf` | ECR `bmi-cicd-backend` / `-frontend`, secret `bmi-cicd/ci` |
 | `codebuild.tf` | CodeBuild project `bmi-cicd`, its role and log group |
@@ -35,7 +35,7 @@ Edit `terraform.tfvars`:
 | --- | --- |
 | `aws_profile`, `region` | your CLI profile and region |
 | `admin_cidrs` | your IP for the SonarQube UI |
-| `domain_name`, `app_host`, `argocd_host` | your hosted zone and the two hostnames |
+| `domain_name`, `app_host`, `argocd_host`, `grafana_host` | your hosted zone and the three hostnames (`grafana_host` must equal `gitops/observability/kube-prometheus-stack-values.yaml`) |
 | `external_dns_zone_id` | only if the account has more than one zone with that name: the one whose name servers match `nslookup -type=ns <domain>` |
 | `github_oidc_provider_arn` | only if the account already has a GitHub OIDC provider (`aws iam list-open-id-connect-providers`) |
 | `api_public_access_cidrs` | optional: lock the Kubernetes API to your IP |
@@ -66,7 +66,12 @@ is still pending and SonarQube isn't configured. That's expected. The app's back
 show `ImagePullBackOff` until the first successful BuildPush.
 
 Argo CD: `terraform output argocd_url`, user `admin`, password from
-`terraform output -raw argocd_admin_password_command`.
+`terraform output -raw argocd_admin_password_command`. Six apps appear: `root`, `bmi-cicd`,
+`kube-prometheus-stack`, `loki`, `alloy`, `observability-extras`.
+
+Grafana: `terraform output grafana_url`, user `admin`, password from
+`terraform output -raw grafana_admin_password_command`. Dashboard **BMI → BMI app (CI/CD)**;
+what's where is in the [console guide](01-console-guide.md#observability-what-you-get).
 
 ## Step 3: Approve the GitHub connection (one click)
 
@@ -111,7 +116,8 @@ Or push a change to `app/`. The run takes 10–15 minutes:
   HIGH/CRITICAL CVE is **not pushed**.
 - Accept a finding on purpose in [`.trivyignore`](../.trivyignore), with the reason.
 
-When Verify is green, `https://cicd-bmi.bestclick.click` serves the new version. From now on,
+When Verify is green, `https://cicd-bmi.bestclick.click` serves the new version, and Grafana's
+**Live version** panel shows the same tag. From now on,
 every push that touches `app/**`, `tests/**`, `pipeline/**` or `sonar-project.properties` runs it.
 
 ## Changing things later
@@ -123,6 +129,9 @@ every push that touches `app/**`, `tests/**`, `pipeline/**` or `sonar-project.pr
 | Trivy version | `TRIVY_VERSION` + `TRIVY_SHA256` in `pipeline/stages/lib.sh` (from the release's checksums file) |
 | Trivy threshold | `TRIVY_SEVERITY` / `TRIVY_MISCONFIG_GATE` as environment variables on the CodeBuild project |
 | Node count / instance type | `node_*` variables, apply |
+| Dashboards, alert rules | `gitops/observability/extras/` (JSON + PrometheusRule), push. Argo CD syncs it |
+| Retention, volume sizes, alert receivers | `gitops/observability/*-values.yaml`, push |
+| Observability chart versions | `targetRevision` in `gitops/argocd/apps/*.yaml`; keep `prometheus_operator_crds_chart_version` in step with kube-prometheus-stack |
 | Rotate the GitHub token | `aws secretsmanager put-secret-value` (Terraform ignores the value after creation) |
 | Your IP changed | update `admin_cidrs` (and `api_public_access_cidrs` if set), apply |
 | Stop paying for SonarQube when idle | `aws ec2 stop-instances --instance-ids <id>`. The Elastic IP keeps the URL; start it before running the pipeline |
@@ -142,6 +151,7 @@ GitHub connection, which saves Step 3), plan, apply, then delete the import bloc
 | `Error: Kubernetes cluster unreachable` | `aws` not on PATH, wrong `aws_profile`, or your IP isn't in `api_public_access_cidrs` |
 | Hostname doesn't resolve, but the ALB works | More than one hosted zone with the same name: set `external_dns_zone_id` |
 | First SmokeTest times out on `unreachable`, browser works | CodeBuild's resolver cached "no such name" from before the record existed. Retry the Verify stage |
+| Grafana login fails | `grafana-admin` must exist before kube-prometheus-stack syncs (Terraform creates it first). Restart the Grafana deployment after changing it |
 
 Everything else: the [console guide's table](01-console-guide.md#troubleshooting).
 
@@ -151,8 +161,9 @@ Everything else: the [console guide's table](01-console-guide.md#troubleshooting
 terraform -chdir=terraform destroy
 ```
 
-`terraform_data.app_teardown` runs first: it deletes the Argo CD Application and the `bmi-cicd`
-namespace while the LB Controller still runs, so the ALB and the Postgres EBS volume are gone
-before the VPC is deleted. ECR repos and the artifact bucket are force-deleted with their
+`terraform_data.app_teardown` runs first: it deletes the Argo CD root app (and with it every
+child app), the `bmi-cicd` namespace, the observability volumes (Prometheus, Alertmanager, Loki)
+and every Ingress, while the LB Controller, EBS CSI driver and NAT gateway still run. So the ALB
+and all EBS volumes are gone before the network is deleted. ECR repos and the artifact bucket are force-deleted with their
 contents; the secret is deleted without a recovery window, so you can apply again at once.
-Delete the `cicd-bmi` and `argocd-cicd` Route 53 records by hand (ExternalDNS is `upsert-only`).
+Delete the `cicd-bmi`, `argocd-cicd` and `grafana-cicd` Route 53 records by hand (ExternalDNS is `upsert-only`).

@@ -47,3 +47,12 @@ output "argocd_admin_password_command" {
 output "certificate_arn" {
   value = local.certificate_arn
 }
+
+output "grafana_url" {
+  description = "Dashboards (folder BMI), Explore for metrics (Prometheus) and logs (Loki), alerts."
+  value       = "https://${var.grafana_host}"
+}
+
+output "grafana_admin_password_command" {
+  value = "kubectl -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d"
+}

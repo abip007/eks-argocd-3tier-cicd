@@ -1,8 +1,9 @@
-# BMI Health Tracker: CI/CD pipeline with SonarQube, quality gate and smoke tests
+# BMI Health Tracker: CI/CD, security scanning and observability on EKS + Argo CD
 
-A self-contained EKS + Argo CD platform with a **CI/CD pipeline** in front of the GitOps
-deployment. The Terraform path builds everything (VPC, EKS cluster, controllers, Argo CD,
-SonarQube, pipeline) in one apply. A `git push` to `app/` starts AWS CodePipeline:
+A self-contained EKS + Argo CD platform with a **CI/CD pipeline** (unit tests, SonarQube
+quality gate, Trivy, smoke tests) in front of the GitOps deployment, and an **observability
+stack** (Prometheus, Alertmanager, Grafana, Loki, Alloy) that watches the app and every release.
+The Terraform path builds all of it in one apply. A `git push` to `app/` starts AWS CodePipeline:
 
 ```
 git push (app/**, tests/**, pipeline/**)
@@ -19,6 +20,10 @@ git push (app/**, tests/**, pipeline/**)
                                                        tag to gitops/ ──┐   then 7 HTTP checks
                              Argo CD (in bmi-cicd-eks) ◄────────────────┘   against the public URL
                              syncs gitops/bmi-cicd → namespace bmi-cicd
+                                    │ /metrics, JSON logs
+                                    ▼
+                  Prometheus ─► Alertmanager      Alloy ─► Loki
+                        └──────► Grafana ◄───────────────┘   https://grafana-cicd.bestclick.click
 ```
 
 Every stage can stop a release. Failing tests, coverage under 80%, a red quality gate or a
@@ -28,13 +33,14 @@ team knows the release is broken. To roll back, `git revert` the release commit.
 | What | Where |
 | --- | --- |
 | App (backend Express + pg, frontend React/Vite on nginx) | `app/` |
-| **Unit tests (new)**: backend Jest + Supertest (34 tests), frontend Vitest + Testing Library (24 tests) | `app/backend/tests/`, `app/frontend/tests/` |
+| **Unit tests (new)**: backend Jest + Supertest (41 tests), frontend Vitest + Testing Library (24 tests) | `app/backend/tests/`, `app/frontend/tests/` |
 | **Smoke tests (new)**: curl checks against the live URL | `tests/smoke/smoke.sh` |
 | Pipeline definition: one buildspec + one bash script per stage | `pipeline/` |
 | SonarQube analysis settings | `sonar-project.properties` |
 | **Security scan (Trivy)**: dependency CVEs, secrets, IaC misconfig, image CVEs | `pipeline/stages/security-scan.sh`, `.trivyignore` |
 | SonarQube server bootstrap (EC2 user data) and one-time setup | `sonarqube/` |
-| Kubernetes manifests Argo CD deploys | `gitops/bmi-cicd/`, `gitops/argocd/bmi-cicd-app.yaml` |
+| Kubernetes manifests Argo CD deploys | `gitops/bmi-cicd/` (app), `gitops/argocd/root-app.yaml` + `gitops/argocd/apps/` (app-of-apps) |
+| **Observability**: chart values, BMI dashboard, alert rules | `gitops/observability/`, backend `/metrics` + JSON logs in `app/backend/src/app.js` |
 | Terraform for everything above | `terraform/` |
 | JSON templates for the command-line path | `cli/` |
 
@@ -43,7 +49,7 @@ team knows the release is broken. To roll back, `git revert` the release commit.
 | Resource | Name | Notes |
 | --- | --- | --- |
 | CodePipeline (V2, QUEUED mode) | `bmi-cicd` | Trigger: push to `main` touching `app/**`, `pipeline/**`, `tests/**`, `sonar-project.properties` |
-| CodeBuild project | `bmi-cicd` | One project for all 5 actions; the action's `STAGE` env var picks the script |
+| CodeBuild project | `bmi-cicd` | One project for all 6 actions; the action's `STAGE` env var picks the script |
 | CodeConnections GitHub connection | `bmi-cicd-github` | Must be approved once in the console |
 | S3 bucket | `bmi-cicd-artifacts-<account>-<region>` | Pipeline artifacts, 30-day expiry |
 | ECR repositories | `bmi-cicd-backend`, `bmi-cicd-frontend` | Immutable tags, scan on push |
@@ -52,7 +58,8 @@ team knows the release is broken. To roll back, `git revert` the release commit.
 | IAM roles | `bmi-cicd-codebuild`, `bmi-cicd-codepipeline`, `bmi-cicd-sonarqube-ec2` | Least privilege, scoped to the resources above |
 | VPC + EKS cluster (Terraform path) | `bmi-cicd-eks`, VPC `10.2.0.0/16`, 2 × m7i-flex.large nodes | One NAT gateway, add-ons, Pod Identity roles |
 | Platform in the cluster (Terraform path) | LB Controller, ExternalDNS, Argo CD (`https://argocd-cicd.bestclick.click`) | App and Argo CD UI share one ALB (`group.name: shared`) |
-| App in the cluster | namespace `bmi-cicd`, 2 secrets, Argo CD app `bmi-cicd` | |
+| App in the cluster | namespace `bmi-cicd`, 2 secrets, Argo CD `root` app → `bmi-cicd` | |
+| Observability (Argo CD apps) | namespace `observability`: kube-prometheus-stack (Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics), Loki, Alloy, BMI dashboard + alerts | Grafana at `https://grafana-cicd.bestclick.click`; EBS volumes: Prometheus 20 GiB, Loki 10 GiB, Alertmanager 2 GiB |
 | Public URL | `https://cicd-bmi.bestclick.click` | ExternalDNS creates the record; the existing wildcard ACM cert covers it |
 
 Nothing here depends on the eks-argocd-3tier project. Its names (`argo-eks`, `argocd.bestclick.click`,
@@ -91,10 +98,11 @@ These values are in the files. Change them if yours differ:
 | Account ID | `014882039467` | `eksctl/cluster.yaml` (policy ARNs), overlay `kustomization.yaml` (cert ARN) |
 | Cluster / VPC | `bmi-cicd-eks` / `10.2.0.0/16` | `cli/config.env`, `eksctl/cluster.yaml`, tfvars |
 | Argo CD host | `argocd-cicd.bestclick.click` | `platform/argocd-values.yaml`, `cli/config.env`, tfvars |
+| Grafana host + certificate | `grafana-cicd.bestclick.click` | `gitops/observability/kube-prometheus-stack-values.yaml` (3×), tfvars `grafana_host` |
 | Route 53 zone ID (only with duplicate zones) | `Z070283435VR70B93SKIX` | `platform/external-dns-values.yaml`, tfvars `external_dns_zone_id` |
 | App host | `cicd-bmi.bestclick.click` | `gitops/bmi-cicd/overlays/prod/kustomization.yaml` (2×), `cli/config.env`, tfvars |
 | ACM certificate ARN | wildcard cert of `bestclick.click` | overlay `kustomization.yaml`, `platform/argocd-values.yaml` (Terraform looks it up) |
-| GitHub repo | `abip007/eks-argocd-3tier-cicd` | `gitops/argocd/bmi-cicd-app.yaml`, `cli/config.env`, tfvars |
+| GitHub repo | `abip007/eks-argocd-3tier-cicd` | `gitops/argocd/root-app.yaml` + `apps/*.yaml`, `cli/config.env`, tfvars |
 | Image tags | written by every pipeline run | overlay `kustomization.yaml` (`ImagePullBackOff` on a fresh account until the first BuildPush) |
 
 ## Three ways to build it (pick one)
@@ -148,6 +156,22 @@ on the action. `TRIVY_SEVERITY` (default `HIGH,CRITICAL`) changes the threshold.
 finding, add its ID to `.trivyignore` with the reason and a review date. CodeBuild shows the
 results under **Reports** (`security-scan`).
 
+**Observability.** The backend serves `/metrics` (prom-client: request histogram per route and
+status code, Node.js runtime, and `bmi_app_info{version}` = the live image tag) and writes one
+JSON log line per request. Argo CD deploys the stack from `gitops/argocd/apps/`:
+
+| Piece | Job |
+| --- | --- |
+| Prometheus | scrapes the backend (ServiceMonitor), Argo CD, Loki, Alloy, nodes and Kubernetes objects; 7-day retention |
+| Alertmanager | receives the alerts; no receiver yet (add Slack/email in `kube-prometheus-stack-values.yaml`) |
+| Grafana | dashboard **BMI → BMI app (CI/CD)**: live version, Argo CD sync/health, pods per version, request rate, 5xx ratio, latency percentiles, CPU/memory, Postgres volume, logs. Plus the chart's Kubernetes dashboards and Explore |
+| Loki + Alloy | every pod's logs and Kubernetes events, 7-day retention; `{namespace="bmi-cicd", app="bmi-backend"} \| json \| status >= 500` |
+| Alert rules (`gitops/observability/extras/bmi-alerts.yaml`) | backend down, 5xx > 5%, p95 > 1 s, Postgres volume < 15% free, Argo CD app out of sync / unhealthy, pods stuck on two versions |
+
+The pipeline and the stack meet at the version: BuildPush writes the image tag into `gitops/`,
+the backend reports it as `bmi_app_info`, and the dashboard's **Live version** panel flips to it
+when the rollout is done. A release that never lands raises `BmiArgoAppOutOfSync` or `BmiMixedVersions`.
+
 **Smoke test.** Argo CD deploys on its own schedule, so `smoke-test.sh` first polls
 `GET /api/health` until the live `version` equals the pipeline's `IMAGE_TAG` (max 15 min). The
 build writes that tag into the backend ConfigMap as `APP_VERSION`. Then `tests/smoke/smoke.sh`
@@ -196,10 +220,12 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W)":/repo -w /repo node:20 bash pi
 | EKS control plane | ~$0.10/h |
 | 2 × m7i-flex.large nodes | ~$0.20/h together (free-plan eligible) |
 | NAT gateway | ~$0.056/h + data |
-| ALB (shared by the app and Argo CD) | ~$0.025/h + LCU |
+| ALB (shared by the app, Argo CD and Grafana) | ~$0.025/h + LCU |
+| Observability volumes (32 GiB gp3) | ~$2.60/month; the stack itself runs on the existing nodes |
 
 ## Tear down
 
 Use the path you built with: Terraform `terraform destroy`, or the *Clean up* section of the
-console or CLI guide. Delete the Argo CD application **first**, so the Ingress rule and the EBS
-volume go away cleanly.
+console or CLI guide. Delete the Argo CD **root** app, the observability volumes and the
+Ingresses **first** (Terraform's teardown step does this), so the ALB and every EBS volume go
+away cleanly instead of being left behind.

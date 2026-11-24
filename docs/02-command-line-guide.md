@@ -2,8 +2,9 @@
 
 The same result as the [console guide](01-console-guide.md) and [Terraform](03-terraform-guide.md),
 with `aws`, `eksctl`, `kubectl` and `helm`: the EKS cluster and its VPC, the platform (Load
-Balancer Controller, ExternalDNS, Argo CD), the app, SonarQube, and the CodePipeline with unit
-tests, SonarQube, Trivy and smoke tests.
+Balancer Controller, ExternalDNS, Argo CD), the app with its observability stack (Prometheus,
+Alertmanager, Grafana, Loki, Alloy), SonarQube, and the CodePipeline with unit tests,
+SonarQube, Trivy and smoke tests.
 
 Run everything in **Git Bash** from the project root. Longer JSON documents are templates in
 [`cli/`](../cli); `render <file>` fills in your values and writes them to `cli/.out/`. IDs you'll
@@ -109,7 +110,13 @@ helm upgrade --install external-dns external-dns \
   --repo https://kubernetes-sigs.github.io/external-dns/ -n external-dns --create-namespace \
   -f platform/external-dns-values.yaml --wait
 
-# 2.4 Argo CD
+# 2.4 Prometheus Operator CRDs, before Argo CD (its ServiceMonitors need them)
+kubectl create namespace observability
+helm upgrade --install prometheus-operator-crds prometheus-operator-crds \
+  --repo https://prometheus-community.github.io/helm-charts --version 33.0.1 \
+  -n observability --wait
+
+# 2.5 Argo CD (metrics on, scraped by Prometheus)
 helm upgrade --install argocd argo-cd \
   --repo https://argoproj.github.io/argo-helm -n argocd --create-namespace \
   -f platform/argocd-values.yaml --wait --timeout 15m
@@ -124,7 +131,7 @@ Argo CD UI: `https://$ARGOCD_HOST`, user `admin`, the password above.
 
 # Part B: The app
 
-## Step 3: Secrets and the Argo CD Application
+## Step 3: Secrets and the Argo CD root app
 
 ```bash
 kubectl create namespace "$NAME"
@@ -136,10 +143,22 @@ kubectl -n "$NAME" create secret generic backend-secret \
   --from-literal=DATABASE_URL="postgres://bmi_user:$DB_PASS@bmi-postgres-svc:5432/bmidb"
 unset DB_PASS
 
-kubectl apply -f gitops/argocd/bmi-cicd-app.yaml
-kubectl -n argocd get application "$NAME"          # Synced; pods come up below
+GRAFANA_PASS=$(openssl rand -hex 12)
+kubectl -n observability create secret generic grafana-admin \
+  --from-literal=admin-user=admin --from-literal=admin-password="$GRAFANA_PASS"
+echo "Grafana: admin / $GRAFANA_PASS"; unset GRAFANA_PASS     # note it down
+
+# root = app-of-apps: Argo CD creates every Application in gitops/argocd/apps/
+kubectl apply -f gitops/argocd/root-app.yaml
+kubectl -n argocd get applications     # root, bmi-cicd, kube-prometheus-stack, loki, alloy, observability-extras
 kubectl -n "$NAME" get pods,ingress
+kubectl -n observability get pods      # prometheus, alertmanager, grafana, loki-0, alloy (3-5 min)
 ```
+
+Grafana: `https://grafana-cicd.bestclick.click` (user `admin`). Dashboard **BMI → BMI app (CI/CD)**
+shows the live release, Argo CD sync/health, request rate, errors, latency and logs. The
+[console guide's observability section](01-console-guide.md#observability-what-you-get) says
+what's where.
 
 Postgres starts now. Backend and frontend stay in **ImagePullBackOff** until the pipeline's
 first BuildPush pushes images (Step 13). That's expected on a fresh account.
@@ -363,7 +382,14 @@ BUILD_ID=$(aws codebuild list-builds-for-project --project-name "$NAME" --query 
 MSYS_NO_PATHCONV=1 aws logs tail "/codebuild/$NAME" --log-stream-name-prefix "${BUILD_ID#*:}" --since 1h
 ```
 
-When Verify is green: `curl -s https://$APP_HOST/api/health` shows the released `version`.
+When Verify is green: `curl -s https://$APP_HOST/api/health` shows the released `version`, and
+Grafana's **Live version** panel shows the same tag. The backend's metrics, from inside the cluster:
+
+```bash
+kubectl -n "$NAME" port-forward svc/bmi-backend-svc 3000:3000 &
+curl -s localhost:3000/metrics | grep -E '^bmi_app_info|^http_request_duration_seconds_count' | head
+kill %1
+```
 From now on, every push that touches `app/` runs the pipeline.
 
 **Trivy** runs twice: `SecurityScan` scans the repo (dependency CVEs, secrets, misconfig in
@@ -386,6 +412,8 @@ aws codepipeline retry-stage-execution --pipeline-name "$NAME" --stage-name Veri
 aws ssm start-session --target "$INSTANCE_ID"                    # shell on SonarQube (SSM plugin)
 kubectl -n "$NAME" get pods,ingress; kubectl -n argocd get application "$NAME"
 kubectl -n external-dns logs deploy/external-dns --tail=20
+kubectl -n observability get pods,pvc; kubectl -n observability logs deploy/alloy --tail=20
+kubectl -n observability port-forward svc/kube-prometheus-stack-prometheus 9090 &   # http://localhost:9090/targets
 ```
 
 ---
@@ -394,10 +422,13 @@ kubectl -n external-dns logs deploy/external-dns --tail=20
 
 ```bash
 source cli/config.env; source cli/ids.env
-# 1. App first, so the ALB and the EBS volume go away while the controllers still run
-kubectl -n argocd delete application "$NAME" --wait
-kubectl delete namespace "$NAME"
-helm -n argocd uninstall argocd; sleep 60                       # last Ingress -> ALB deleted
+# 1. Apps first, so the ALB and the EBS volumes go away while the controllers still run
+kubectl -n argocd delete application root --wait                # deletes all child apps
+kubectl delete namespace "$NAME"                                # Postgres volume
+kubectl delete pvc --all -n observability                       # Prometheus, Alertmanager, Loki volumes
+kubectl delete ingress --all -A; sleep 60                       # last Ingress -> ALB deleted
+helm -n argocd uninstall argocd
+helm -n observability uninstall prometheus-operator-crds
 helm -n external-dns uninstall external-dns
 helm -n kube-system uninstall aws-load-balancer-controller
 
@@ -432,4 +463,6 @@ for p in lbc external-dns; do aws iam delete-policy --policy-arn "arn:aws:iam::$
 rm -f cli/ids.env; rm -rf cli/.out
 ```
 
-Route 53: delete the `cicd-bmi` and `argocd-cicd` records by hand (ExternalDNS is `upsert-only`).
+Route 53: delete the `cicd-bmi`, `argocd-cicd` and `grafana-cicd` records by hand (ExternalDNS is
+`upsert-only`). Then check for orphaned volumes:
+`aws ec2 describe-volumes --filters Name=status,Values=available --query 'Volumes[].VolumeId'`.

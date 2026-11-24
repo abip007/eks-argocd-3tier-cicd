@@ -10,6 +10,7 @@ const valid = { weightKg: 70, heightCm: 175, age: 30, sex: 'male', activity: 'mo
 beforeEach(() => {
   db.query.mockReset();
   jest.spyOn(console, 'error').mockImplementation(() => {});
+  jest.spyOn(console, 'log').mockImplementation(() => {});   // JSON request logs
 });
 afterEach(() => jest.restoreAllMocks());
 

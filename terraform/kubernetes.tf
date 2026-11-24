@@ -1,5 +1,5 @@
-# The app in the cluster: namespace + DB secrets (never in Git) + the Argo CD
-# Application that deploys gitops/bmi-cicd/overlays/prod from this repo.
+# In the cluster: app namespace + DB secrets and the Grafana admin secret (never in
+# Git), and the Argo CD root Application that deploys everything in gitops/argocd/apps/.
 # After this Terraform never touches the app again - Argo CD deploys it from Git.
 
 resource "kubernetes_namespace_v1" "app" {
@@ -34,11 +34,30 @@ resource "kubernetes_secret_v1" "backend" {
   }
 }
 
-# Same content as gitops/argocd/bmi-cicd-app.yaml (the CLI/console paths apply that file).
+# Grafana admin login (kube-prometheus-stack reads Secret "grafana-admin"). Never in Git.
+resource "random_password" "grafana" {
+  length  = 24
+  special = false
+}
+
+resource "kubernetes_secret_v1" "grafana_admin" {
+  metadata {
+    name      = "grafana-admin"
+    namespace = kubernetes_namespace_v1.observability.metadata[0].name
+  }
+  data = {
+    admin-user     = "admin"
+    admin-password = random_password.grafana.result
+  }
+}
+
+# Root Application (app-of-apps) = gitops/argocd/root-app.yaml. Argo CD then creates
+# every Application in gitops/argocd/apps/: bmi-cicd (the app) and the observability
+# stack (kube-prometheus-stack, loki, alloy, observability-extras).
 # Shipped through the argocd-apps chart, not kubernetes_manifest, so 'plan' works
 # before the cluster and Argo CD's CRDs exist.
 resource "helm_release" "argocd_app" {
-  name       = "${var.name}-app"
+  name       = "argocd-root-app"
   repository = "https://argoproj.github.io/argo-helm"
   chart      = "argocd-apps"
   version    = var.argocd_apps_chart_version
@@ -46,30 +65,17 @@ resource "helm_release" "argocd_app" {
 
   values = [yamlencode({
     applications = {
-      (var.name) = {
+      root = {
         namespace  = "argocd"
         finalizers = ["resources-finalizer.argocd.argoproj.io"]
         project    = "default"
         source = {
           repoURL        = "https://github.com/${var.github_repo}.git"
           targetRevision = var.git_branch
-          path           = "gitops/bmi-cicd/overlays/prod"
+          path           = "gitops/argocd/apps"
         }
-        destination = { server = "https://kubernetes.default.svc", namespace = var.name }
-        syncPolicy = {
-          automated   = { prune = true, selfHeal = true }
-          syncOptions = ["CreateNamespace=true"]
-          retry = {
-            limit   = 5
-            backoff = { duration = "10s", factor = 2, maxDuration = "3m" }
-          }
-        }
-        ignoreDifferences = [{
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "bmi-backend"
-          jsonPointers = ["/spec/replicas"]
-        }]
+        destination = { server = "https://kubernetes.default.svc", namespace = "argocd" }
+        syncPolicy  = { automated = { prune = true, selfHeal = true } }
       }
     }
   })]
@@ -77,15 +83,17 @@ resource "helm_release" "argocd_app" {
   depends_on = [
     helm_release.argocd,
     helm_release.external_dns,
+    helm_release.prometheus_operator_crds,
     kubernetes_storage_class_v1.gp3,
     kubernetes_secret_v1.postgres,
     kubernetes_secret_v1.backend,
+    kubernetes_secret_v1.grafana_admin,
   ]
 }
 
-# On 'terraform destroy' this runs FIRST: delete the Argo CD Application (so the
-# LB Controller removes the ALB) and the app namespace (frees the EBS volume)
-# while the controllers are still running. Otherwise the VPC can't be deleted.
+# On 'terraform destroy' this runs FIRST: delete the Argo CD apps (so the LB
+# Controller removes the ALB), the app namespace and the observability volumes
+# (frees the EBS volumes) while the controllers are still running. Otherwise the VPC can't be deleted.
 # depends_on below lists everything that must still exist while it runs:
 # destroy goes in reverse order, so none of these is touched until it's done.
 # Without the network entries, Terraform deleted the NAT gateway in parallel;
@@ -97,8 +105,16 @@ resource "terraform_data" "app_teardown" {
   provisioner "local-exec" {
     when = destroy
     command = join(" && ", [
-      "kubectl --kubeconfig ${self.input.kubeconfig} -n argocd delete application ${self.input.name} --ignore-not-found --wait=true --timeout=10m",
+      # root first: its finalizer deletes the child apps, theirs delete what they deployed
+      "kubectl --kubeconfig ${self.input.kubeconfig} -n argocd delete application root --ignore-not-found --wait=true --timeout=10m",
+      "kubectl --kubeconfig ${self.input.kubeconfig} -n argocd delete application ${self.input.name} kube-prometheus-stack loki alloy observability-extras --ignore-not-found --wait=true --timeout=10m",
       "kubectl --kubeconfig ${self.input.kubeconfig} delete namespace ${self.input.name} --ignore-not-found --wait=true --timeout=10m",
+      # StatefulSet volumes (Prometheus, Alertmanager, Loki) outlive their apps: delete
+      # them while the EBS CSI driver still runs, or the EBS volumes are orphaned
+      "kubectl --kubeconfig ${self.input.kubeconfig} delete pvc --all -n observability --ignore-not-found --wait=true --timeout=10m",
+      # Argo CD's own Ingress keeps the shared ALB alive: delete every Ingress now,
+      # so the LB Controller removes the ALB while it can still reach the AWS API
+      "kubectl --kubeconfig ${self.input.kubeconfig} delete ingress --all -A --ignore-not-found --wait=true --timeout=10m",
     ])
   }
 
@@ -106,6 +122,7 @@ resource "terraform_data" "app_teardown" {
     # what it deletes
     helm_release.argocd_app,
     kubernetes_namespace_v1.app,
+    kubernetes_namespace_v1.observability,
     # who does the deleting: Argo CD, the LB Controller (+ its AWS credentials), EBS CSI
     helm_release.argocd,
     helm_release.aws_load_balancer_controller,

@@ -55,13 +55,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: bmi-backend-svc        # nginx.conf proxies /api to this name
+  labels: { app: bmi-backend } # the ServiceMonitor selects the Service by this label
   annotations:
     argocd.argoproj.io/sync-wave: "2"
 spec:
   type: ClusterIP
   selector: { app: bmi-backend }
   ports:
-    - port: 3000
+    - name: http               # the ServiceMonitor scrapes this port by name
+      port: 3000
       targetPort: 3000
 ---
 apiVersion: autoscaling/v2

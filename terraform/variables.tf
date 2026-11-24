@@ -94,6 +94,12 @@ variable "argocd_host" {
   default     = "argocd-cicd.bestclick.click"
 }
 
+variable "grafana_host" {
+  description = "Public hostname of Grafana. Must equal gitops/observability/kube-prometheus-stack-values.yaml."
+  type        = string
+  default     = "grafana-cicd.bestclick.click"
+}
+
 variable "external_dns_zone_id" {
   description = "Route 53 zone ID ExternalDNS may write to. Set it when the account has several zones with the same name, or records land in a zone nobody queries. Use the zone whose name servers match: nslookup -type=ns <domain>."
   type        = string
@@ -128,6 +134,12 @@ variable "external_dns_chart_version" {
   description = "null = latest."
   type        = string
   default     = null
+}
+
+variable "prometheus_operator_crds_chart_version" {
+  description = "Prometheus Operator CRDs, installed before Argo CD. Keep in step with the operator in kube-prometheus-stack (gitops/argocd/apps/kube-prometheus-stack.yaml)."
+  type        = string
+  default     = "33.0.1"
 }
 
 variable "argocd_chart_version" {

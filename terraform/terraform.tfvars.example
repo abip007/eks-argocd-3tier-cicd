@@ -5,6 +5,7 @@ aws_profile  = "abip007home"
 cluster_name = "bmi-cicd-eks"
 app_host     = "cicd-bmi.bestclick.click"
 argocd_host  = "argocd-cicd.bestclick.click"
+grafana_host = "grafana-cicd.bestclick.click"
 domain_name  = "bestclick.click"
 
 # Several hosted zones with the same name? Pin ExternalDNS to the live one

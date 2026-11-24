@@ -1,5 +1,5 @@
 const express=require('express');const router=express.Router();
-const db=require('./db');const {calculateMetrics}=require('./calculations');
+const db=require('./db');const {calculateMetrics}=require('./calculations');const log=require('./log');
 
 // GET /api/health - reachable through the ALB + nginx (/api/*). Reports the
 // deployed version (APP_VERSION, set by the pipeline in gitops/) and whether
@@ -35,7 +35,7 @@ router.post('/measurements',async(req,res)=>{
     const r=await db.query(q,v);
     res.status(201).json({measurement:r.rows[0]});
   }catch(e){
-    console.error('Error creating measurement:', e);
+    log('error','create measurement failed',{error:e.message});
     res.status(500).json({error: e.message || 'Failed to create measurement'});
   }
 });
@@ -46,7 +46,7 @@ router.get('/measurements',async(req,res)=>{
     const r=await db.query('SELECT * FROM measurements ORDER BY measurement_date DESC, created_at DESC');
     res.json({rows:r.rows});
   } catch(e) {
-    console.error('Error fetching measurements:', e);
+    log('error','fetch measurements failed',{error:e.message});
     res.status(500).json({error: 'Failed to fetch measurements'});
   }
 });
@@ -62,7 +62,7 @@ router.get('/measurements/trends',async(req,res)=>{
     const r=await db.query(q);
     res.json({rows:r.rows});
   } catch(e) {
-    console.error('Error fetching trends:', e);
+    log('error','fetch trends failed',{error:e.message});
     res.status(500).json({error: 'Failed to fetch trends'});
   }
 });

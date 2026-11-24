@@ -11,6 +11,7 @@ resources:
   - backend.yaml
   - frontend.yaml
   - ingress.yaml
+  - servicemonitor.yaml        # Prometheus scrapes the backend's /metrics
 configMapGenerator:
   # Built from the SQL files in migrations/. New migration = add the file
   # there (keep the NNN_ prefix so they sort) and list it below.

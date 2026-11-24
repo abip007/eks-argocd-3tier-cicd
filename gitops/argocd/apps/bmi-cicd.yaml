@@ -1,7 +1,6 @@
-# Argo CD Application for this project. Apply it ONCE to the cluster
-# cluster (kubectl apply -f, or Terraform does it). From then on Argo CD deploys
-# whatever the pipeline commits to gitops/bmi-cicd/overlays/prod.
-# Not part of the old repo's root app-of-apps, so the two projects stay independent.
+# The app. Argo CD renders gitops/bmi-cicd/overlays/prod with Kustomize and keeps the
+# namespace equal to Git; the pipeline's BuildPush commits new image tags there.
+# Created by the root app (gitops/argocd/root-app.yaml) like every file in this folder.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

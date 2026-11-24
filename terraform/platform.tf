@@ -1,5 +1,5 @@
-# Platform inside the cluster: StorageClass, LB Controller, ExternalDNS, Argo CD.
-# The app itself (namespace, secrets, Argo CD Application) is in kubernetes.tf.
+# Platform inside the cluster: StorageClass, LB Controller, ExternalDNS, Prometheus
+# Operator CRDs, Argo CD. Secrets and the Argo CD root Application are in kubernetes.tf.
 
 # Certificate for domain + *.domain. Not created here: an ISSUED cert already
 # exists in the account (set certificate_arn to pin a specific one).
@@ -101,7 +101,34 @@ resource "helm_release" "external_dns" {
   ]
 }
 
+# ---------- Observability prerequisites ----------
+# The stack itself (Prometheus, Alertmanager, Grafana, Loki, Alloy) is deployed by
+# Argo CD from gitops/argocd/apps/. Two things must exist before that:
+#  - the Prometheus Operator CRDs, so ServiceMonitors (Argo CD's own, the backend's)
+#    can be created before kube-prometheus-stack is synced
+#  - the namespace + Grafana admin secret (kubernetes.tf), which never go into Git
+resource "kubernetes_namespace_v1" "observability" {
+  metadata { name = "observability" }
+  depends_on = [aws_eks_node_group.general]
+}
+
+resource "helm_release" "prometheus_operator_crds" {
+  name       = "prometheus-operator-crds"
+  repository = "https://prometheus-community.github.io/helm-charts"
+  chart      = "prometheus-operator-crds"
+  version    = var.prometheus_operator_crds_chart_version
+  namespace  = kubernetes_namespace_v1.observability.metadata[0].name
+  wait       = true
+
+  depends_on = [helm_release.aws_load_balancer_controller]
+}
+
 # ---------- Argo CD ----------
+locals {
+  # Prometheus scrapes Argo CD itself: sync status, app health, Git fetch errors.
+  argocd_metrics = { enabled = true, serviceMonitor = { enabled = true } }
+}
+
 resource "helm_release" "argocd" {
   name             = "argocd"
   repository       = "https://argoproj.github.io/argo-helm"
@@ -117,7 +144,11 @@ resource "helm_release" "argocd" {
       params = { "server.insecure" = true }         # TLS ends at the ALB
       cm     = { "timeout.reconciliation" = "60s" } # poll Git every 60 s
     }
+    controller     = { metrics = local.argocd_metrics }
+    repoServer     = { metrics = local.argocd_metrics }
+    applicationSet = { metrics = local.argocd_metrics }
     server = {
+      metrics = local.argocd_metrics
       ingress = {
         enabled          = true
         ingressClassName = "alb"
@@ -137,5 +168,5 @@ resource "helm_release" "argocd" {
     }
   })]
 
-  depends_on = [helm_release.aws_load_balancer_controller]
+  depends_on = [helm_release.aws_load_balancer_controller, helm_release.prometheus_operator_crds]
 }
